@@ -4,6 +4,7 @@ import android.annotation.SuppressLint;
 import android.app.Activity;
 import android.content.Intent;
 import android.content.pm.PackageManager;
+import android.content.res.Configuration;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
@@ -73,6 +74,17 @@ public class MainActivity extends Activity {
         }
     }
 
+    @Override
+    public void onConfigurationChanged(Configuration newConfig) {
+        super.onConfigurationChanged(newConfig);
+        // radio przełączyło tryb dzień/noc (np. po włączeniu świateł) — motyw "Automatyczny" idzie za nim
+        if (web != null) web.evaluateJavascript("window.__nightMode&&window.__nightMode(" + isNightMode() + ")", null);
+    }
+
+    private boolean isNightMode() {
+        return (getResources().getConfiguration().uiMode & Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES;
+    }
+
     @SuppressWarnings("deprecation")
     @Override
     public void onBackPressed() {
@@ -114,6 +126,11 @@ public class MainActivity extends Activity {
         public void setVolume(float v) {
             RadioService svc = RadioService.instance;
             if (svc != null) svc.setUserVolume(v);
+        }
+
+        @JavascriptInterface
+        public boolean isNight() {
+            return isNightMode();
         }
 
         @JavascriptInterface

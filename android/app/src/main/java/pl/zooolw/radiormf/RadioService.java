@@ -25,15 +25,23 @@ import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
 import android.os.PowerManager;
+import android.text.Html;
 
 import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
 
+import java.io.ByteArrayOutputStream;
+import java.io.InputStream;
+import java.net.HttpURLConnection;
+import java.net.URL;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 /**
  * Odtwarzanie w tle: strumień radia, powiadomienie z przyciskami,
@@ -61,6 +69,7 @@ public class RadioService extends Service {
 
     private static class Station {
         String id = "", name = "", tag = "";
+        int rid = 0;   // numer stacji w RMF ON (do tytułu utworu)
         final List<String> urls = new ArrayList<>();
     }
 
@@ -81,6 +90,14 @@ public class RadioService extends Service {
     private WifiManager.WifiLock wifiLock;
     private Bitmap art;
 
+    // teraz gra
+    private final ExecutorService net = Executors.newSingleThreadExecutor();
+    private int metaGen = 0;
+    private String songA = "", songT = "", songC = "", nextA = "", nextT = "";
+    private String coverLoaded = "";
+    private Bitmap cover;
+
+    private final Runnable metaPoll = this::pollMeta;
     private final Runnable timeout = this::fail;
     private final Runnable reopen = this::openCurrent;
 
@@ -178,6 +195,7 @@ public class RadioService extends Service {
     @Override
     public void onDestroy() {
         main.removeCallbacksAndMessages(null);
+        net.shutdownNow();
         releasePlayer();
         abandonFocus();
         if (wifiLock != null && wifiLock.isHeld()) wifiLock.release();
@@ -202,9 +220,20 @@ public class RadioService extends Service {
 
     String stateJson() {
         if (stations.isEmpty()) return "{}";
+        return eventJson(state);
+    }
+
+    private String eventJson(String ev) {
         JSONObject o = new JSONObject();
         try {
-            o.put("ev", state);
+            o.put("ev", ev);
+            if (songT.isEmpty()) o.put("now", JSONObject.NULL);
+            else {
+                JSONObject n = new JSONObject();
+                n.put("a", songA); n.put("t", songT); n.put("c", songC);
+                n.put("na", nextA); n.put("nt", nextT);
+                o.put("now", n);
+            }
             Station st = current();
             if (st != null) {
                 o.put("id", st.id);
@@ -238,6 +267,7 @@ public class RadioService extends Service {
                 st.id = s.optString("id");
                 st.name = s.optString("name");
                 st.tag = s.optString("tag");
+                st.rid = s.optInt("rid", 0);
                 JSONArray u = s.optJSONArray("urls");
                 if (u != null) for (int j = 0; j < u.length(); j++) st.urls.add(u.getString(j));
                 list.add(st);
@@ -299,7 +329,11 @@ public class RadioService extends Service {
         focusFactor = 1f;
         requestFocus();
         if (wifiLock != null) wifiLock.acquire();
+        clearSong();
+        metaGen++;
+        main.removeCallbacks(metaPoll);
         openCurrent();
+        main.post(metaPoll);
     }
 
     private void openCurrent() {
@@ -379,6 +413,9 @@ public class RadioService extends Service {
     private void stopPlayback(String finalState) {
         main.removeCallbacks(timeout);
         main.removeCallbacks(reopen);
+        main.removeCallbacks(metaPoll);
+        metaGen++;
+        clearSong();
         releasePlayer();
         abandonFocus();
         if (wifiLock != null && wifiLock.isHeld()) wifiLock.release();
@@ -438,11 +475,136 @@ public class RadioService extends Service {
 
     private void setState(String s) {
         state = s;
+        publish(s);
+    }
+
+    /** Odświeża sesję (kierownica, ekran radia), powiadomienie i stronę. */
+    private void publish(String ev) {
         updateSession();
         NotificationManager nm = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
         if (nm != null && !stations.isEmpty()) nm.notify(NOTIF_ID, buildNotification());
         Listener l = listener;
-        if (l != null) l.onEvent(stateJson());
+        if (l != null && !stations.isEmpty()) l.onEvent(eventJson(ev));
+    }
+
+    // ---------- teraz gra (playlista RMF ON) ----------
+
+    private void clearSong() {
+        songA = songT = songC = nextA = nextT = "";
+        cover = null;
+        coverLoaded = "";
+    }
+
+    private void pollMeta() {
+        Station st = current();
+        if (st == null || st.rid <= 0 || !isActive()) return;
+        final int gen = metaGen;
+        final String url = "https://www.rmfon.pl/stacje/playlista_" + st.rid + ".json.txt";
+        try {
+            net.execute(() -> {
+                final String body = httpText(url);
+                main.post(() -> {
+                    if (gen != metaGen) return;
+                    long wait = body != null ? applyPlaylist(body) : 30000;
+                    main.removeCallbacks(metaPoll);
+                    if (isActive()) main.postDelayed(metaPoll, wait);
+                });
+            });
+        } catch (Exception ignored) { }
+    }
+
+    /** Ustawia bieżący utwór; zwraca, za ile ms zapytać ponownie. */
+    private long applyPlaylist(String body) {
+        try {
+            JSONArray rows = new JSONArray(body);
+            JSONObject cur = null, next = null;
+            for (int i = 0; i < rows.length(); i++) {
+                JSONObject r = rows.optJSONObject(i);
+                if (r == null) continue;
+                int order = r.optInt("order", -99);
+                if (order == 0) cur = r;
+                else if (order == 1) next = r;
+            }
+            if (cur == null) {
+                for (int i = 0; i < rows.length(); i++) {
+                    JSONObject r = rows.optJSONObject(i);
+                    if (r == null) continue;
+                    int u = r.optInt("uptime", 1);
+                    if (u <= 0 && (cur == null || u > cur.optInt("uptime", -999999))) cur = r;
+                }
+            }
+            String t = cur != null ? clean(cur.optString("title")) : "";
+            String a = cur != null ? clean(cur.optString("author")) : "";
+            String c = cur != null ? cur.optString("coverBigUrl", "") : "";
+            if ((c.isEmpty() || "null".equals(c)) && cur != null) c = cur.optString("coverUrl", "");
+            if ("null".equals(c)) c = "";
+            String na = next != null ? clean(next.optString("author")) : "";
+            String nt = next != null ? clean(next.optString("title")) : "";
+            boolean changed = !t.equals(songT) || !a.equals(songA) || !nt.equals(nextT);
+            songT = t; songA = a; songC = c; nextA = na; nextT = nt;
+            if (!c.isEmpty() && !c.equals(coverLoaded)) loadCover(c);
+            if (c.isEmpty()) { cover = null; coverLoaded = ""; }
+            if (changed) publish("meta");
+            int up = next != null ? next.optInt("uptime", 0) : 0;
+            if (up > 0) return Math.max(8000, Math.min(180000, (up + 6) * 1000L));
+        } catch (Exception ignored) { }
+        return 30000;
+    }
+
+    private void loadCover(String url) {
+        coverLoaded = url;
+        final int gen = metaGen;
+        try {
+            net.execute(() -> {
+                Bitmap bmp = null;
+                HttpURLConnection c = null;
+                try {
+                    c = (HttpURLConnection) new URL(url).openConnection();
+                    c.setConnectTimeout(8000);
+                    c.setReadTimeout(8000);
+                    c.setRequestProperty("User-Agent", "RadioRMF-Android/1.0");
+                    try (InputStream in = c.getInputStream()) { bmp = BitmapFactory.decodeStream(in); }
+                } catch (Exception ignored) {
+                } finally {
+                    if (c != null) c.disconnect();
+                }
+                final Bitmap result = bmp;
+                main.post(() -> {
+                    if (gen != metaGen || !url.equals(coverLoaded)) return;
+                    cover = result;
+                    publish("meta");
+                });
+            });
+        } catch (Exception ignored) { }
+    }
+
+    private static String httpText(String url) {
+        HttpURLConnection c = null;
+        try {
+            c = (HttpURLConnection) new URL(url).openConnection();
+            c.setConnectTimeout(8000);
+            c.setReadTimeout(8000);
+            c.setRequestProperty("User-Agent", "RadioRMF-Android/1.0");
+            if (c.getResponseCode() != 200) return null;
+            try (InputStream in = c.getInputStream()) {
+                ByteArrayOutputStream out = new ByteArrayOutputStream();
+                byte[] buf = new byte[8192];
+                int n;
+                while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
+                return new String(out.toByteArray(), StandardCharsets.UTF_8);
+            }
+        } catch (Exception e) {
+            return null;
+        } finally {
+            if (c != null) c.disconnect();
+        }
+    }
+
+    @SuppressWarnings("deprecation")
+    private static String clean(String s) {
+        if (s == null || s.isEmpty() || "null".equals(s)) return "";
+        CharSequence d = Build.VERSION.SDK_INT >= 24 ? Html.fromHtml(s, Html.FROM_HTML_MODE_LEGACY) : Html.fromHtml(s);
+        return d.toString().replaceAll("\\s+", " ").trim();
     }
 
     private String statusLabel() {
@@ -473,11 +635,14 @@ public class RadioService extends Service {
         session.setPlaybackState(b.build());
 
         Station st = current();
+        String stName = st != null ? st.name : "Radio RMF";
+        boolean song = isActive() && !songT.isEmpty();
         MediaMetadata.Builder m = new MediaMetadata.Builder()
-                .putString(MediaMetadata.METADATA_KEY_TITLE, st != null ? st.name : "Radio RMF")
-                .putString(MediaMetadata.METADATA_KEY_ARTIST, statusLabel())
-                .putString(MediaMetadata.METADATA_KEY_ALBUM, "Radio RMF");
-        if (art != null) m.putBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART, art);
+                .putString(MediaMetadata.METADATA_KEY_TITLE, song ? songT : stName)
+                .putString(MediaMetadata.METADATA_KEY_ARTIST, song ? (songA.isEmpty() ? stName : songA) : statusLabel())
+                .putString(MediaMetadata.METADATA_KEY_ALBUM, song ? stName : "Radio RMF");
+        Bitmap pic = (song && cover != null) ? cover : art;
+        if (pic != null) m.putBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART, pic);
         session.setMetadata(m.build());
         // sesja zostaje aktywna po zatrzymaniu, żeby przycisk "graj" na kierownicy działał
         session.setActive(!stations.isEmpty());
@@ -519,9 +684,11 @@ public class RadioService extends Service {
                 ? new Notification.Builder(this, CHANNEL)
                 : new Notification.Builder(this);
         Intent open = new Intent(this, MainActivity.class).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP);
+        String stName = st != null ? st.name : "Radio RMF";
+        boolean song = active && !songT.isEmpty();
         b.setSmallIcon(R.drawable.ic_stat_radio)
-                .setContentTitle(st != null ? st.name : "Radio RMF")
-                .setContentText(statusLabel())
+                .setContentTitle(song ? songT : stName)
+                .setContentText(song ? (songA.isEmpty() ? stName : songA + " · " + stName) : statusLabel())
                 .setContentIntent(PendingIntent.getActivity(this, 0, open, piFlags()))
                 .setDeleteIntent(serviceIntent(ACTION_STOP, 1, false))
                 .setOngoing(active)
@@ -535,7 +702,8 @@ public class RadioService extends Service {
                 .setStyle(new Notification.MediaStyle()
                         .setMediaSession(session.getSessionToken())
                         .setShowActionsInCompactView(0, 1, 2));
-        if (art != null) b.setLargeIcon(art);
+        Bitmap pic = (song && cover != null) ? cover : art;
+        if (pic != null) b.setLargeIcon(pic);
         if (Build.VERSION.SDK_INT < 26) b.setPriority(Notification.PRIORITY_LOW);
         return b.build();
     }

@@ -5,6 +5,16 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>Radio RMF</title>
 <meta name="theme-color" content="#151c2b">
+<script>
+/* motyw ustawiony przed narysowaniem strony, żeby w nocy nie błysnęło jasnym ekranem */
+(function(){
+  try{
+    var t = JSON.parse(localStorage.getItem('rmfradio:theme') || '"auto"');
+    if (t !== 'dark' && t !== 'light' && window.AndroidRadio && AndroidRadio.isNight) t = AndroidRadio.isNight() ? 'dark' : 'light';
+    if (t === 'dark' || t === 'light') document.documentElement.setAttribute('data-theme', t);
+  }catch(e){}
+})();
+</script>
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="Radio RMF">
@@ -21,20 +31,27 @@
   --bg:#e9edf2; --panel:#fbfcfd; --ink:#131926; --muted:#566074; --line:#d3d9e2;
   --accent:#b5650b; --needle:#d3392c;
   --glass:#151c2b; --glass-ink:#f4c36a; --glass-dim:#7d8aa3; --glass-line:#2a3448;
-  --ok:#1f8a4c; --bad:#c0392b;
+  --ok:#1f8a4c; --bad:#c0392b; --play-bg:#131926; --play-fg:#fbfcfd;
   --f-display:"Big Shoulders Display","Arial Narrow",Impact,sans-serif;
   --f-body:"Instrument Sans",system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
   --f-mono:"IBM Plex Mono",ui-monospace,"SFMono-Regular",Menlo,Consolas,monospace;
   color-scheme:light;
 }
 @media (prefers-color-scheme:dark){
-  :root{
+  :root:not([data-theme="light"]){
     --bg:#0d121b; --panel:#151c29; --ink:#e7ebf2; --muted:#93a0b6; --line:#253044;
     --accent:#f0a53a; --needle:#ff5e50;
     --glass:#090d15; --glass-ink:#f7c56d; --glass-dim:#5f6d86; --glass-line:#1d2638;
-    --ok:#3ccf7b; --bad:#ff6b5e;
+    --ok:#3ccf7b; --bad:#ff6b5e; --play-bg:#232e44; --play-fg:#f0a53a;
     color-scheme:dark;
   }
+}
+:root[data-theme="dark"]{
+    --bg:#0d121b; --panel:#151c29; --ink:#e7ebf2; --muted:#93a0b6; --line:#253044;
+    --accent:#f0a53a; --needle:#ff5e50;
+    --glass:#090d15; --glass-ink:#f7c56d; --glass-dim:#5f6d86; --glass-line:#1d2638;
+    --ok:#3ccf7b; --bad:#ff6b5e; --play-bg:#232e44; --play-fg:#f0a53a;
+    color-scheme:dark;
 }
 *{box-sizing:border-box}
 html,body{margin:0}
@@ -55,9 +72,30 @@ button,input{font:inherit;color:inherit}
 }
 
 /* Nagłówek */
-.top{display:flex;align-items:baseline;justify-content:space-between;gap:12px;flex-wrap:wrap}
+.top{display:flex;align-items:center;justify-content:space-between;gap:12px}
+@media (max-width:440px){ .top .sub{display:none} }
 .brand{margin:0;font:800 30px/1 var(--f-display);text-transform:uppercase;letter-spacing:.05em}
 .sub{font:12px var(--f-mono);color:var(--muted);letter-spacing:.04em}
+.top-right{display:flex;align-items:center;gap:12px}
+.btn-theme{
+  width:40px; height:40px; border-radius:50%; border:1px solid var(--line);
+  background:transparent; display:grid; place-items:center; cursor:pointer; align-self:center;
+}
+.btn-theme svg{width:20px;height:20px;fill:currentColor}
+.btn-theme:hover{border-color:var(--accent);color:var(--accent)}
+
+/* Teraz gra */
+.track{
+  display:grid; grid-template-columns:64px minmax(0,1fr); gap:14px; align-items:center;
+  padding:12px; border-radius:12px; background:var(--bg); border:1px solid var(--line);
+}
+.track.no-cover{grid-template-columns:minmax(0,1fr)}
+.cover{width:64px;height:64px;border-radius:8px;object-fit:cover;background:var(--line);display:block}
+.track-text{min-width:0;display:grid;gap:1px}
+.track-label{font:500 11px var(--f-mono);text-transform:uppercase;letter-spacing:.12em;color:var(--accent)}
+.track-title{font-weight:600;font-size:17px;line-height:1.25;overflow-wrap:anywhere}
+.track-artist{color:var(--muted);overflow-wrap:anywhere}
+.track-next{font:12px var(--f-mono);color:var(--muted);margin-top:5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 
 /* Skala odbiornika */
 .dial{
@@ -128,7 +166,7 @@ button,input{font:inherit;color:inherit}
 }
 .btn-round:hover{border-color:var(--muted)}
 .btn-round svg{width:22px;height:22px;fill:currentColor}
-.btn-play{position:relative;width:80px;height:80px;border:0;background:var(--ink);color:var(--panel)}
+.btn-play{position:relative;width:80px;height:80px;border:0;background:var(--play-bg);color:var(--play-fg)}
 .btn-play:hover{background:var(--accent);color:var(--panel)}
 .btn-play svg{width:30px;height:30px}
 .btn-play[data-s="connecting"]::after,.btn-play[data-s="buffering"]::after{
@@ -223,7 +261,12 @@ kbd{font:inherit;border:1px solid var(--line);border-bottom-width:2px;border-rad
 <main class="app">
   <header class="top">
     <h1 class="brand">Radio RMF</h1>
-    <span class="sub">odbiornik internetowy</span>
+    <div class="top-right">
+      <span class="sub">odbiornik internetowy</span>
+      <button class="btn-theme" id="themeBtn" type="button" aria-label="Przełącz na ciemny motyw" title="Ciemny / jasny motyw">
+        <svg viewBox="0 0 24 24" id="themeIcon" aria-hidden="true"></svg>
+      </button>
+    </div>
   </header>
 
   <div class="player">
@@ -242,6 +285,15 @@ kbd{font:inherit;border:1px solid var(--line);border-bottom-width:2px;border-rad
     <div>
       <h2 class="station-name" id="stName">RMF FM</h2>
       <p class="station-tag" id="stTag">Muzyka i Fakty</p>
+    </div>
+    <div class="track" id="track" hidden>
+      <img class="cover" id="cover" alt="" width="64" height="64" referrerpolicy="no-referrer">
+      <div class="track-text">
+        <span class="track-label">Teraz gra</span>
+        <span class="track-title" id="trTitle"></span>
+        <span class="track-artist" id="trArtist"></span>
+        <span class="track-next" id="trNext" hidden></span>
+      </div>
     </div>
     <div class="status" id="status" data-s="idle"><span class="led"></span><span id="statusText">Gotowe — naciśnij start</span></div>
     <div class="meta" id="meta">serwery rmfstream.pl</div>
@@ -300,6 +352,15 @@ kbd{font:inherit;border:1px solid var(--line);border-bottom-width:2px;border-rad
         <span class="setting-note" id="qualityNote">ok. 56 MB na godzinę słuchania</span>
       </div>
       <div class="setting">
+        <span class="setting-label">Motyw</span>
+        <div class="chips" id="theme">
+          <button class="chip" type="button" data-t="auto" aria-pressed="true">Automatyczny</button>
+          <button class="chip" type="button" data-t="dark" aria-pressed="false">Ciemny</button>
+          <button class="chip" type="button" data-t="light" aria-pressed="false">Jasny</button>
+        </div>
+        <span class="setting-note" id="themeNote">Zgodnie z trybem nocnym urządzenia</span>
+      </div>
+      <div class="setting">
         <span class="setting-label">Wyłącznik czasowy</span>
         <div class="chips" id="sleep">
           <button class="chip" type="button" data-min="0" aria-pressed="true">Wył.</button>
@@ -337,11 +398,23 @@ var NATIVE = window.AndroidRadio || null;
 /* ---------- stacje ---------- */
 var HOSTS = ['rs101-krk','rs201-krk','rs202-krk','rs103-krk','rs102-krk-cyfronet','rs9-krk2'].map(function(h){ return h + '.rmfstream.pl'; });
 var BUILTIN = [
-  {id:'rmf-fm',           name:'RMF FM',           short:'FM',      tag:'Muzyka i Fakty — stacja główna',  mp3:'rmf_fm',           aac:'RMFFM48'},
-  {id:'rmf-maxx',         name:'RMF MAXX',         short:'MAXX',    tag:'Nowe hity, humor i konkursy',     mp3:'rmf_maxxx',        aac:'RMFMAXXX48'},
-  {id:'rmf-classic',      name:'RMF Classic',      short:'Classic', tag:'Muzyka filmowa i klasyczna',      mp3:'rmf_classic',      aac:'RMFCLASSIC48'},
-  {id:'rmf-classic-rock', name:'RMF Classic Rock', short:'Rock',    tag:'Rockowe klasyki',                 mp3:'rmf_classic_rock'}
+  {id:'rmf-fm',           name:'RMF FM',           short:'FM',      tag:'Muzyka i Fakty — stacja główna',  rid:5, mp3:'rmf_fm',           aac:'RMFFM48'},
+  {id:'rmf-maxx',         name:'RMF MAXX',         short:'MAXX',    tag:'Nowe hity, humor i konkursy',     rid:6, mp3:'rmf_maxxx',        aac:'RMFMAXXX48'},
+  {id:'rmf-classic',      name:'RMF Classic',      short:'Classic', tag:'Muzyka filmowa i klasyczna',      rid:7, mp3:'rmf_classic',      aac:'RMFCLASSIC48'},
+  {id:'rmf-classic-rock', name:'RMF Classic Rock', short:'Rock',    tag:'Rockowe klasyki',                 rid:2, mp3:'rmf_classic_rock'}
 ];
+
+/* numery stacji w katalogu RMF ON: z nich bierzemy tytuł granego utworu */
+var RMFON = {};
+'5:RMF FM|6:RMF MAXX|7:RMF Classic|190:RADIO RMF24|233:RMF Classic bez świątecznej muzyki|115:RMF w pracy|97:RMF 5 Łagodne Przeboje|9:RMF Polskie przeboje|23:RMF Party|110:RMF Disco polo|3:RMF Dance|2:RMF Classic rock|15:RMF Gold|17:RMF Święta|172:RMF Przebój Lata 2024|80:RMF Kolędy|116:RMF Relaks|168:RMF ŚWIĄTECZNE NOWOŚCI 2023|94:RMF 2 Pop|128:RMF Top 30 święta|95:RMF 3 Pop-Rock|96:RMF 4 Dance & RNB|241:Dodaphone|240:RMF MAXX FEAT|48:RMF 50s|44:RMF 60s|45:RMF 70s|108:RMF 70s disco|25:RMF 80s|109:RMF 80s disco|46:RMF 90s|130:RMF 90s dance|81:RMF 2000|159:RMF 10s|236:RMF 20s|28:RMF Alternatywa|43:RMF dla dzieci|112:Best of RMFON|39:RMF Blues|77:RMF Beatlemania|12:RMF Viral|11:RMF Chillout|67:RMF Celtic|29:RMF Club|53:RMF Cuba|31:RMF Depeche Mode|153:RMF Disco|117:RMF Fitness|118:RMF Fitness rock|265:RMF GENZIE|54:RMF Francais|156:RMF GameMusic|10:RMF Słoneczne przeboje|68:RMF Grunge|32:RMF Hard & heavy|37:RMF Hip hop|158:RMF Polski Hip Hop|27:RMF Hot new|173:RMF wakacyjne TOP 100|30:RMF Lady Pank|22:RMF MAXX Hop bęc|14:RMF LOVE|73:RMF Michael Jackson|33:RMF Muzyka filmowa|86:RMF Muzyka klasyczna|161:RMF Latino|127:Największe polskie przeboje|111:RMF Niezapomniane melodie|93:RMF Ballady|166:RMF Piosenka filmowa|65:RMF Piosenka literacka|165:RMF Pobudka|164:RMF Polska prywatka|52:RMF Klasyka Polskiego Hip Hopu|36:RMF Polski rock|8:RMF Poplista|38:RMF PRL|61:RMF Queen|40:RMF Reggae|4:RMF R&B|1:RMF Rock|84:RMF Rock progresywny|16:RMF Smooth jazz|163:RMF Cafe|79:RMF Styl|49:RMF Szanty|82:30 lat RMF FM|119:RMF Top 30 dance|122:RMF Top 30 disco polo|120:RMF Top 30 pl|121:RMF Top 30 pop|242:RMF Jesienny Vibe|243:RMF Crush|244:RMF Po polsku o miłości|245:RMF Romantic|266:RMF True Crime|194:RMF MAXX Bydgoszcz|195:RMF MAXX Mazowsze|196:RMF MAXX Częstochowa|197:RMF MAXX Trójmiasto|198:RMF MAXX Inowrocław|199:RMF MAXX Świętokrzyskie|200:RMF MAXX Konin|201:RMF MAXX Kraków|202:RMF MAXX Krosno|203:RMF MAXX Podlasie|204:RMF MAXX Nowy Sącz|205:RMF MAXX Oleśnica|206:RMF MAXX Opole|207:RMF MAXX Piła|208:RMF MAXX Poznań|209:RMF MAXX Śląsk|210:RMF MAXX Pomorze|211:RMF MAXX Szczecin|212:RMF MAXX Dolny Śląsk|213:RMF MAXX Warszawa|214:RMF MAXX Włocławek|215:RMF MAXX Lubuskie|234:RMF Vibe|235:RMF Polska Alternatywa|237:RMF Leniwa Niedziela|238:RMF w Kuchni|239:RMF Ladies|85:RMF Classic Chopin|227:RMF Classic Mindfulness|251:RMF Classic Hans Zimmer|252:RMF Classic John Williams'.split('|').forEach(function(p){
+  var i = p.indexOf(':'); RMFON[nameKey(p.slice(i + 1))] = +p.slice(0, i);
+});
+RMFON['rmf maxxx'] = 6;
+function nameKey(n){
+  return String(n || '').toLowerCase().replace(/&amp;/g, '&').replace(/_/g, ' ')
+    .replace(/\d+\s*kbps/g, ' ').replace(/^radio\s+/, '').replace(/\s+/g, ' ').trim();
+}
+function ridOf(st){ return st ? (st.rid || RMFON[nameKey(st.name)] || 0) : 0; }
 
 var quality = store.get('quality', 'hi');
 var favs = store.get('favs', []);          // pełne obiekty kanałów
@@ -402,7 +475,7 @@ function nativePlay(){
   var payload = {index:0, volume:(muted ? 0 : effVolume()), list:list.map(function(s, i){
     if (s.id === current.id) idx = i;
     var cs = s.id === current.id ? cands : candidatesFor(s);
-    return {id:s.id, name:s.name, tag:s.tag || '', urls:cs.map(function(c){ return c.url; })};
+    return {id:s.id, name:s.name, tag:s.tag || '', rid:ridOf(s), urls:cs.map(function(c){ return c.url; })};
   })};
   payload.index = idx;
   try{ NATIVE.play(JSON.stringify(payload)); }catch(e){ setState('failed'); }
@@ -418,6 +491,7 @@ function start(st){
   cands = candidatesFor(current);
   ci = 0;
   listenStart = 0;
+  showTrack(null); stopMeta(); metaFails = 0;
   showStation();
   if (NATIVE){ nativePlay(); setState('connecting'); return; }
   tryCandidate(token);
@@ -500,6 +574,8 @@ window.__radio = function(e){
     var st = findStation(e.id);
     if (st){ current = st; store.set('last', st.id); listenStart = 0; cands = candidatesFor(st); showStation(); }
   }
+  if ('now' in e) showTrack(e.now);
+  if (e.ev === 'meta') return;
   if (e.url){
     var k = -1, i;
     for (i = 0; i < cands.length; i++) if (cands[i].url === e.url){ k = i; break; }
@@ -548,6 +624,10 @@ function setState(s){
   var active = (s === 'playing' || s === 'connecting' || s === 'buffering');
   $('playIcon').innerHTML = active ? ICON_STOP : ICON_PLAY;
   $('play').setAttribute('aria-label', active ? 'Stop' : 'Start');
+  if (!NATIVE){
+    if (s === 'playing') pollMetaSoon();
+    else if (s === 'paused' || s === 'failed' || s === 'idle'){ stopMeta(); showTrack(null); }
+  }
   var c = (active && cands[ci]) ? cands[ci] : null;
   $('meta').textContent = c ? c.host + ' · ' + c.fmt : (current && current.cands ? 'katalog Radio Browser' : 'serwery rmfstream.pl');
   $('dialRight').textContent = c ? c.fmt : '—';
@@ -568,6 +648,109 @@ function showStation(){
   markLists();
   setMediaMeta();
 }
+
+/* ---------- teraz gra ---------- */
+var lastTrack = null, metaTimer = null, metaBusy = false, metaFails = 0;
+
+function cleanText(v){
+  var d = document.createElement('textarea');
+  d.innerHTML = String(v == null ? '' : v);
+  return d.value.replace(/\s+/g, ' ').trim();
+}
+function parsePlaylist(rows){
+  if (!rows || !rows.length) return null;
+  var cur = null, next = null;
+  rows.forEach(function(r){ if (+r.order === 0) cur = r; else if (+r.order === 1) next = r; });
+  if (!cur) rows.forEach(function(r){ var u = +r.uptime; if (u <= 0 && (!cur || u > +cur.uptime)) cur = r; });
+  if (!cur || !cur.title) return null;
+  var wait = (next && +next.uptime > 0) ? Math.min(180000, Math.max(8000, (+next.uptime + 6) * 1000)) : 30000;
+  return {
+    a: cleanText(cur.author), t: cleanText(cur.title), c: cur.coverBigUrl || cur.coverUrl || '',
+    na: next ? cleanText(next.author) : '', nt: next ? cleanText(next.title) : '', wait: wait
+  };
+}
+function showTrack(info){
+  lastTrack = (info && info.t) ? info : null;
+  var box = $('track');
+  if (!lastTrack){ box.hidden = true; setMediaMeta(); return; }
+  $('trTitle').textContent = lastTrack.t;
+  $('trArtist').textContent = lastTrack.a || '';
+  $('trArtist').hidden = !lastTrack.a;
+  var nx = lastTrack.nt ? 'Następnie: ' + (lastTrack.na ? lastTrack.na + ' – ' : '') + lastTrack.nt : '';
+  $('trNext').textContent = nx;
+  $('trNext').hidden = !nx;
+  var img = $('cover');
+  if (lastTrack.c){
+    if (img.getAttribute('src') !== lastTrack.c) img.src = lastTrack.c;
+    img.hidden = false; box.classList.remove('no-cover');
+  } else { img.hidden = true; box.classList.add('no-cover'); }
+  box.hidden = false;
+  setMediaMeta();
+}
+$('cover').addEventListener('error', function(){ this.hidden = true; $('track').classList.add('no-cover'); });
+
+function stopMeta(){ clearTimeout(metaTimer); metaTimer = null; }
+function pollMetaSoon(){ if (!metaTimer && !metaBusy) pollMeta(); }
+function pollMeta(){
+  metaTimer = null;
+  if (NATIVE) return;
+  var st = current, rid = ridOf(st);
+  if (!rid || !(state === 'playing' || state === 'buffering')) return;
+  metaBusy = true;
+  var forId = st.id;
+  fetchWithTimeout('https://www.rmfon.pl/stacje/playlista_' + rid + '.json.txt', 8000).then(function(rows){
+    metaBusy = false;
+    if (!current || current.id !== forId) return;
+    var info = parsePlaylist(rows);
+    showTrack(info);
+    metaFails = 0;
+    metaTimer = setTimeout(pollMeta, info ? info.wait : 30000);
+  }).catch(function(){
+    metaBusy = false;
+    metaFails++;
+    if (metaFails < 3) metaTimer = setTimeout(pollMeta, 30000);   // potem cisza do następnej zmiany stacji
+  });
+}
+
+/* ---------- motyw ---------- */
+var themePref = store.get('theme', 'auto');
+var ICON_MOON = '<path d="M20 14.6A8.4 8.4 0 0 1 9.4 4a8.4 8.4 0 1 0 10.6 10.6z"/>';
+var ICON_SUN = '<circle cx="12" cy="12" r="4.2"/><path d="M12 1.8v3M12 19.2v3M1.8 12h3M19.2 12h3M4.8 4.8l2.1 2.1M17.1 17.1l2.1 2.1M4.8 19.2l2.1-2.1M17.1 6.9l2.1-2.1" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" fill="none"/>';
+function nativeNight(){
+  try{ return (NATIVE && NATIVE.isNight) ? !!NATIVE.isNight() : null; }catch(e){ return null; }
+}
+function effectiveTheme(){
+  if (themePref === 'dark' || themePref === 'light') return themePref;
+  var n = nativeNight();
+  if (n !== null) return n ? 'dark' : 'light';
+  return (window.matchMedia && matchMedia('(prefers-color-scheme: dark)').matches) ? 'dark' : 'light';
+}
+function applyTheme(){
+  var root = document.documentElement, eff = effectiveTheme();
+  if (themePref === 'auto' && nativeNight() === null) root.removeAttribute('data-theme');
+  else root.setAttribute('data-theme', eff);
+  var m = document.querySelector('meta[name="theme-color"]');
+  if (m) m.setAttribute('content', eff === 'dark' ? '#0d121b' : '#e9edf2');
+  $('themeIcon').innerHTML = eff === 'dark' ? ICON_SUN : ICON_MOON;
+  $('themeBtn').setAttribute('aria-label', eff === 'dark' ? 'Przełącz na jasny motyw' : 'Przełącz na ciemny motyw');
+  Array.prototype.slice.call($('theme').querySelectorAll('.chip')).forEach(function(b){
+    b.setAttribute('aria-pressed', b.dataset.t === themePref ? 'true' : 'false');
+  });
+  $('themeNote').textContent = themePref === 'auto'
+    ? 'Zgodnie z trybem nocnym urządzenia (teraz: ' + (eff === 'dark' ? 'ciemny' : 'jasny') + ')'
+    : (themePref === 'dark' ? 'Zawsze ciemny — dobry do jazdy nocą' : 'Zawsze jasny');
+}
+function setTheme(t){ themePref = t; store.set('theme', t); applyTheme(); }
+$('theme').addEventListener('click', function(e){
+  var b = e.target.closest('.chip'); if (b) setTheme(b.dataset.t);
+});
+$('themeBtn').addEventListener('click', function(){ setTheme(effectiveTheme() === 'dark' ? 'light' : 'dark'); });
+if (window.matchMedia){
+  var mq = matchMedia('(prefers-color-scheme: dark)');
+  var onMq = function(){ if (themePref === 'auto') applyTheme(); };
+  if (mq.addEventListener) mq.addEventListener('change', onMq); else if (mq.addListener) mq.addListener(onMq);
+}
+window.__nightMode = function(){ if (themePref === 'auto') applyTheme(); };
 
 /* ---------- skala ---------- */
 function dialList(){
@@ -869,7 +1052,9 @@ function setMediaMeta(){
   try{
     var a = artwork(current.name);
     navigator.mediaSession.metadata = new MediaMetadata({
-      title: current.name, artist: 'Na żywo', album: 'Radio RMF',
+      title: lastTrack ? lastTrack.t : current.name,
+      artist: lastTrack ? (lastTrack.a || current.name) : 'Na żywo',
+      album: lastTrack ? current.name : 'Radio RMF',
       artwork: a ? [{src:a, sizes:'512x512', type:'image/png'}] : []
     });
   }catch(e){}
@@ -898,6 +1083,7 @@ document.addEventListener('keydown', function(e){
 var cached = store.get('channels', null);
 if (cached && cached.list && cached.list.length){ channels = cached.list; chStatus = 'ok'; }
 current = findStation(store.get('last', 'rmf-fm')) || BUILTIN[0];
+applyTheme();
 paintVolume();
 paintQuality();
 renderStations();
