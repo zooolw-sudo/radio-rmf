@@ -200,6 +200,15 @@ h2{margin:0;font:500 12px var(--f-mono);text-transform:uppercase;letter-spacing:
 .setting-note{font:12px var(--f-mono);color:var(--muted);font-variant-numeric:tabular-nums}
 
 footer{font:12px/1.6 var(--f-mono);color:var(--muted);display:grid;gap:4px}
+.player,.side{display:grid;gap:22px;min-width:0}
+
+/* Ekran poziomy (radio w desce, tablet): odtwarzacz po lewej, listy po prawej */
+@media (min-width:880px) and (orientation:landscape){
+  .app{max-width:1180px;grid-template-columns:minmax(0,1fr) minmax(0,1fr);column-gap:28px;align-items:start}
+  .top,footer{grid-column:1 / -1}
+  .player{position:sticky;top:16px}
+  .list.scroll{max-height:none}
+}
 kbd{font:inherit;border:1px solid var(--line);border-bottom-width:2px;border-radius:4px;padding:0 5px}
 
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.45}}
@@ -217,6 +226,7 @@ kbd{font:inherit;border:1px solid var(--line);border-bottom-width:2px;border-rad
     <span class="sub">odbiornik internetowy</span>
   </header>
 
+  <div class="player">
   <section class="dial" aria-label="Skala stacji">
     <div class="scale" id="scale">
       <div class="ticks" aria-hidden="true"></div>
@@ -256,7 +266,9 @@ kbd{font:inherit;border:1px solid var(--line);border-bottom-width:2px;border-rad
       <span class="vol-val" id="volVal">80%</span>
     </div>
   </section>
+  </div>
 
+  <div class="side">
   <section class="section" aria-labelledby="hStations">
     <div class="section-head">
       <h2 id="hStations">Moje stacje</h2>
@@ -300,6 +312,7 @@ kbd{font:inherit;border:1px solid var(--line);border-bottom-width:2px;border-rad
       </div>
     </div>
   </section>
+  </div>
 
   <footer>
     <span>Skróty: <kbd>Spacja</kbd> start/stop · <kbd>←</kbd> <kbd>→</kbd> zmiana stacji · <kbd>M</kbd> wyciszenie</span>
@@ -317,6 +330,9 @@ var store = {
   set: function(k, v){ try{ localStorage.setItem('rmfradio:'+k, JSON.stringify(v)); }catch(e){} }
 };
 function $(id){ return document.getElementById(id); }
+
+/* w aplikacji na Androida gra natywny odtwarzacz, strona jest tylko pilotem */
+var NATIVE = window.AndroidRadio || null;
 
 /* ---------- stacje ---------- */
 var HOSTS = ['rs101-krk','rs201-krk','rs202-krk','rs103-krk','rs102-krk-cyfronet','rs9-krk2'].map(function(h){ return h + '.rmfstream.pl'; });
@@ -366,6 +382,7 @@ var state = 'idle', cands = [], ci = 0, token = 0, wantPlaying = false;
 var connectTimer = null, stallTimer = null, listenStart = 0;
 var vol = store.get('vol', 0.8);
 var sleepEnd = 0, sleepIv = null;
+var muted = false;
 
 function effVolume(){
   if (sleepEnd){
@@ -373,6 +390,22 @@ function effVolume(){
     if (left < 10000) return Math.max(0, vol * left / 10000);
   }
   return vol;
+}
+
+function applyVolume(){
+  if (NATIVE){ try{ NATIVE.setVolume(muted ? 0 : effVolume()); }catch(e){} }
+  else { audio.volume = effVolume(); audio.muted = muted; }
+}
+
+function nativePlay(){
+  var list = dialList(), idx = 0;
+  var payload = {index:0, volume:(muted ? 0 : effVolume()), list:list.map(function(s, i){
+    if (s.id === current.id) idx = i;
+    var cs = s.id === current.id ? cands : candidatesFor(s);
+    return {id:s.id, name:s.name, tag:s.tag || '', urls:cs.map(function(c){ return c.url; })};
+  })};
+  payload.index = idx;
+  try{ NATIVE.play(JSON.stringify(payload)); }catch(e){ setState('failed'); }
 }
 
 function start(st){
@@ -386,6 +419,7 @@ function start(st){
   ci = 0;
   listenStart = 0;
   showStation();
+  if (NATIVE){ nativePlay(); setState('connecting'); return; }
   tryCandidate(token);
 }
 
@@ -396,6 +430,7 @@ function tryCandidate(t){
   setState('connecting');
   audio.src = c.url;
   audio.volume = effVolume();
+  audio.muted = muted;
   var p = audio.play();
   if (p && p.catch){
     p.catch(function(err){
@@ -418,6 +453,7 @@ function hardStop(){
 function stop(){
   token++;
   wantPlaying = false;
+  if (NATIVE){ try{ NATIVE.stop(); }catch(e){} setState(current ? 'paused' : 'idle'); return; }
   hardStop();
   setState(current ? 'paused' : 'idle');
 }
@@ -455,7 +491,35 @@ audio.addEventListener('pause', function(){
   // pauza z zewnątrz (słuchawki, system) — zatrzymaj porządnie, żeby po wznowieniu grać na żywo
   if (state === 'playing' || state === 'buffering') stop();
 });
-window.addEventListener('online', function(){ if (wantPlaying && state !== 'playing') start(); });
+window.addEventListener('online', function(){ if (!NATIVE && wantPlaying && state !== 'playing') start(); });
+
+/* zdarzenia z natywnego odtwarzacza (aplikacja na Androida) */
+window.__radio = function(e){
+  if (!NATIVE || !e || !e.ev) return;
+  if (e.id && (!current || current.id !== e.id)){
+    var st = findStation(e.id);
+    if (st){ current = st; store.set('last', st.id); listenStart = 0; cands = candidatesFor(st); showStation(); }
+  }
+  if (e.url){
+    var k = -1, i;
+    for (i = 0; i < cands.length; i++) if (cands[i].url === e.url){ k = i; break; }
+    if (k < 0 && current){
+      cands = candidatesFor(current);
+      for (i = 0; i < cands.length; i++) if (cands[i].url === e.url){ k = i; break; }
+    }
+    ci = k < 0 ? 0 : k;
+  }
+  if (e.ev === 'connecting' || e.ev === 'buffering'){ wantPlaying = true; setState(e.ev); }
+  else if (e.ev === 'playing'){
+    wantPlaying = true;
+    var c = cands[ci];
+    if (c && c.host && current && !current.cands) store.set('host:' + current.id, c.host);
+    if (!listenStart) listenStart = Date.now();
+    setState('playing');
+  }
+  else if (e.ev === 'failed'){ wantPlaying = false; setState('failed'); }
+  else if (e.ev === 'stopped'){ wantPlaying = false; setState(current ? 'paused' : 'idle'); }
+};
 
 /* ---------- interfejs: stan ---------- */
 var ICON_PLAY = '<path d="M8 5.5v13l11-6.5z"/>';
@@ -720,21 +784,21 @@ $('play').addEventListener('click', toggle);
 var ICON_VOL = '<path d="M4 9.5v5h3.6L12 18.6V5.4L7.6 9.5z"/><path d="M15 9a4 4 0 0 1 0 6M17.4 6.6a7.4 7.4 0 0 1 0 10.8" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>';
 var ICON_MUTE = '<path d="M4 9.5v5h3.6L12 18.6V5.4L7.6 9.5z"/><path d="M15.5 9.5l5 5m0-5l-5 5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>';
 function paintVolume(){
-  var muted = audio.muted || vol === 0;
-  $('muteIcon').innerHTML = muted ? ICON_MUTE : ICON_VOL;
-  $('mute').setAttribute('aria-pressed', audio.muted ? 'true' : 'false');
-  $('mute').setAttribute('aria-label', audio.muted ? 'Włącz dźwięk' : 'Wycisz');
+  var silent = muted || vol === 0;
+  $('muteIcon').innerHTML = silent ? ICON_MUTE : ICON_VOL;
+  $('mute').setAttribute('aria-pressed', muted ? 'true' : 'false');
+  $('mute').setAttribute('aria-label', muted ? 'Włącz dźwięk' : 'Wycisz');
   $('volVal').textContent = Math.round(vol * 100) + '%';
 }
 $('volume').value = Math.round(vol * 100);
 $('volume').addEventListener('input', function(e){
   vol = e.target.value / 100;
-  audio.volume = effVolume();
-  if (audio.muted && vol > 0) audio.muted = false;
+  if (muted && vol > 0) muted = false;
+  applyVolume();
   store.set('vol', vol);
   paintVolume();
 });
-$('mute').addEventListener('click', function(){ audio.muted = !audio.muted; paintVolume(); });
+$('mute').addEventListener('click', function(){ muted = !muted; applyVolume(); paintVolume(); });
 
 /* ---------- jakość ---------- */
 function paintQuality(){
@@ -759,7 +823,7 @@ function setSleep(min){
   Array.prototype.slice.call($('sleep').querySelectorAll('.chip')).forEach(function(b){
     b.setAttribute('aria-pressed', +b.dataset.min === min ? 'true' : 'false');
   });
-  audio.volume = effVolume();
+  applyVolume();
   if (min) sleepIv = setInterval(tickSleep, 1000);
   tickSleep();
 }
@@ -772,7 +836,7 @@ function tickSleep(){
     $('sleepNote').textContent = 'Wyłącznik zatrzymał radio o ' + hhmm(new Date()) + '.';
     return;
   }
-  if (left < 10000) audio.volume = effVolume();
+  if (left < 10000) applyVolume();
   $('sleepNote').textContent = 'Stop o ' + hhmm(new Date(sleepEnd)) + ' · zostało ' + clock(left);
 }
 function hhmm(d){ return pad(d.getHours()) + ':' + pad(d.getMinutes()); }
@@ -801,7 +865,7 @@ function artwork(name){
   }catch(e){ return null; }
 }
 function setMediaMeta(){
-  if (!('mediaSession' in navigator) || !current || !window.MediaMetadata) return;
+  if (NATIVE || !('mediaSession' in navigator) || !current || !window.MediaMetadata) return;
   try{
     var a = artwork(current.name);
     navigator.mediaSession.metadata = new MediaMetadata({
@@ -810,7 +874,7 @@ function setMediaMeta(){
     });
   }catch(e){}
 }
-if ('mediaSession' in navigator){
+if (!NATIVE && 'mediaSession' in navigator){
   var ms = navigator.mediaSession;
   [['play', function(){ start(); }], ['pause', stop], ['stop', stop],
    ['nexttrack', function(){ step(1); }], ['previoustrack', function(){ step(-1); }]
@@ -827,7 +891,7 @@ document.addEventListener('keydown', function(e){
     e.preventDefault(); toggle();
   } else if (e.key === 'ArrowRight'){ step(1); }
   else if (e.key === 'ArrowLeft'){ step(-1); }
-  else if (e.key === 'm' || e.key === 'M'){ audio.muted = !audio.muted; paintVolume(); }
+  else if (e.key === 'm' || e.key === 'M'){ muted = !muted; applyVolume(); paintVolume(); }
 });
 
 /* ---------- start ---------- */
@@ -840,6 +904,7 @@ renderStations();
 renderChannels();
 showStation();
 setState('idle');
+if (NATIVE){ try{ var s0 = JSON.parse(NATIVE.state() || '{}'); if (s0 && s0.ev) window.__radio(s0); }catch(e){} }
 if (!cached || !cached.list || Date.now() - cached.t > 3 * 864e5) loadChannels();
 
 // tryb aplikacji: kopia offline i instalacja na ekranie głównym (działa tylko z adresu https)

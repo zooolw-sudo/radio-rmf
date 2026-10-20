@@ -1,0 +1,56 @@
+name: Android APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: android-apk
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.11.1'
+
+      - name: Skopiuj aplikację do APK
+        run: |
+          mkdir -p android/app/src/main/assets
+          cp index.html manifest.webmanifest icon-192.png icon-512.png apple-touch-icon.png android/app/src/main/assets/
+
+      - name: Zbuduj APK
+        working-directory: android
+        run: gradle assembleRelease --no-daemon --stacktrace
+
+      - name: Nazwij plik
+        run: cp android/app/build/outputs/apk/release/app-release.apk radio-rmf.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: radio-rmf-apk
+          path: radio-rmf.apk
+
+      - name: Wystaw do pobrania (Releases)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete apk --yes --cleanup-tag || true
+          gh release create apk radio-rmf.apk \
+            --target "${{ github.sha }}" \
+            --title "Radio RMF na Androida (wersja 1.0.${{ github.run_number }})" \
+            --notes "Plik APK do zainstalowania w radiu samochodowym z Androidem lub w telefonie. Bezpośredni link: https://github.com/${{ github.repository }}/releases/latest/download/radio-rmf.apk" \
+            --latest
