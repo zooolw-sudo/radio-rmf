@@ -154,7 +154,8 @@ button,input{font:inherit;color:inherit}
 .status{display:flex;align-items:center;gap:9px;font:500 13px var(--f-mono);font-variant-numeric:tabular-nums}
 .led{flex:none;width:9px;height:9px;border-radius:50%;background:var(--muted)}
 .status[data-s="playing"] .led{background:var(--ok);box-shadow:0 0 8px var(--ok);animation:pulse 1.8s ease-in-out infinite}
-.status[data-s="connecting"] .led,.status[data-s="buffering"] .led{background:var(--accent);animation:blink .8s steps(2) infinite}
+.status[data-s="interrupted"] .led{background:var(--accent)}
+.status[data-s="connecting"] .led,.status[data-s="buffering"] .led,.status[data-s="waiting"] .led{background:var(--accent);animation:blink .8s steps(2) infinite}
 .status[data-s="failed"] .led{background:var(--bad)}
 .status[data-s="failed"]{color:var(--bad)}
 .meta{margin-top:-8px;font:12px var(--f-mono);color:var(--muted);overflow-wrap:anywhere}
@@ -169,7 +170,7 @@ button,input{font:inherit;color:inherit}
 .btn-play{position:relative;width:80px;height:80px;border:0;background:var(--play-bg);color:var(--play-fg)}
 .btn-play:hover{background:var(--accent);color:var(--panel)}
 .btn-play svg{width:30px;height:30px}
-.btn-play[data-s="connecting"]::after,.btn-play[data-s="buffering"]::after{
+.btn-play[data-s="connecting"]::after,.btn-play[data-s="buffering"]::after,.btn-play[data-s="waiting"]::after{
   content:""; position:absolute; inset:-6px; border-radius:50%;
   border:2px solid transparent; border-top-color:var(--accent); border-right-color:var(--accent);
   animation:spin 1s linear infinite;
@@ -452,6 +453,7 @@ function candidatesFor(st){
 var audio = new Audio();
 audio.preload = 'none';
 var state = 'idle', cands = [], ci = 0, token = 0, wantPlaying = false;
+var pauseCall = false, netOffline = false;   // przerwa przez rozmowę, brak internetu
 var connectTimer = null, stallTimer = null, listenStart = 0;
 var vol = store.get('vol', 0.8);
 var sleepEnd = 0, sleepIv = null;
@@ -499,7 +501,12 @@ function start(st){
 
 function tryCandidate(t){
   if (t !== token) return;
-  if (ci >= cands.length){ hardStop(); setState('failed'); return; }
+  if (ci >= cands.length){
+    hardStop();
+    if (navigator.onLine === false){ netOffline = true; setState('waiting'); }   // wróci, gdy będzie zasięg
+    else setState('failed');
+    return;
+  }
   var c = cands[ci];
   setState('connecting');
   audio.src = c.url;
@@ -532,8 +539,8 @@ function stop(){
   setState(current ? 'paused' : 'idle');
 }
 function toggle(){
-  if (state === 'playing' || state === 'connecting' || state === 'buffering') stop();
-  else start();
+  if (state === 'playing' || state === 'connecting' || state === 'buffering' || state === 'waiting') stop();
+  else start();   // także "wstrzymane": wznów od razu
 }
 function reconnect(){
   if (!current) return;
@@ -562,10 +569,22 @@ audio.addEventListener('error', function(){
 });
 audio.addEventListener('ended', function(){ if (wantPlaying) reconnect(); });
 audio.addEventListener('pause', function(){
-  // pauza z zewnątrz (słuchawki, system) — zatrzymaj porządnie, żeby po wznowieniu grać na żywo
-  if (state === 'playing' || state === 'buffering') stop();
+  // Pauza od systemu (np. połączenie telefoniczne). Nie zrywamy strumienia,
+  // bo po rozmowie system sam wznawia odtwarzanie — wtedy łączymy się na nowo.
+  if (NATIVE || !wantPlaying) return;   // radio zatrzymaliśmy sami
+  if (state === 'playing' || state === 'buffering' || state === 'connecting'){
+    clearTimeout(connectTimer); clearTimeout(stallTimer);
+    pauseCall = false;
+    setState('interrupted');
+  }
 });
-window.addEventListener('online', function(){ if (!NATIVE && wantPlaying && state !== 'playing') start(); });
+audio.addEventListener('play', function(){
+  // system wznowił po rozmowie: nowe połączenie, żeby grać na żywo, a nie od miejsca sprzed przerwy
+  if (!NATIVE && state === 'interrupted') start();
+});
+window.addEventListener('online', function(){
+  if (!NATIVE && wantPlaying && state !== 'playing' && state !== 'interrupted') start();
+});
 
 /* zdarzenia z natywnego odtwarzacza (aplikacja na Androida) */
 window.__radio = function(e){
@@ -593,6 +612,8 @@ window.__radio = function(e){
     if (!listenStart) listenStart = Date.now();
     setState('playing');
   }
+  else if (e.ev === 'interrupted'){ wantPlaying = true; pauseCall = !!e.call; setState('interrupted'); }
+  else if (e.ev === 'waiting'){ wantPlaying = true; netOffline = !!e.offline; setState('waiting'); }
   else if (e.ev === 'failed'){ wantPlaying = false; setState('failed'); }
   else if (e.ev === 'stopped'){ wantPlaying = false; setState(current ? 'paused' : 'idle'); }
 };
@@ -613,6 +634,10 @@ function statusText(){
     case 'playing':    return 'Na żywo · ' + clock(Date.now() - listenStart);
     case 'paused':     return 'Zatrzymane';
     case 'failed':     return 'Brak połączenia z serwerami tej stacji. Sprawdź internet albo wybierz inną.';
+    case 'interrupted':
+      if (!NATIVE) return 'Przerwa (np. rozmowa) — wznowię po jej końcu';
+      return pauseCall ? 'Wstrzymane na czas rozmowy — wznowię po jej końcu' : 'Wstrzymane — wznowię automatycznie';
+    case 'waiting':    return netOffline ? 'Brak internetu — połączę, gdy wróci zasięg' : 'Ponawiam połączenie…';
     default:           return 'Gotowe — naciśnij start';
   }
 }
@@ -621,17 +646,20 @@ function setState(s){
   $('status').dataset.s = s;
   $('play').dataset.s = s;
   $('statusText').textContent = statusText();
-  var active = (s === 'playing' || s === 'connecting' || s === 'buffering');
+  var active = (s === 'playing' || s === 'connecting' || s === 'buffering' || s === 'waiting');
   $('playIcon').innerHTML = active ? ICON_STOP : ICON_PLAY;
   $('play').setAttribute('aria-label', active ? 'Stop' : 'Start');
   if (!NATIVE){
     if (s === 'playing') pollMetaSoon();
     else if (s === 'paused' || s === 'failed' || s === 'idle'){ stopMeta(); showTrack(null); }
+    else if (s === 'interrupted' || s === 'waiting') stopMeta();
   }
   var c = (active && cands[ci]) ? cands[ci] : null;
   $('meta').textContent = c ? c.host + ' · ' + c.fmt : (current && current.cands ? 'katalog Radio Browser' : 'serwery rmfstream.pl');
   $('dialRight').textContent = c ? c.fmt : '—';
-  $('dialLeft').textContent = s === 'playing' ? 'Odbiór' : (s === 'connecting' || s === 'buffering') ? 'Strojenie' : 'Strumień';
+  $('dialLeft').textContent = s === 'playing' ? 'Odbiór'
+    : (s === 'connecting' || s === 'buffering' || s === 'waiting') ? 'Strojenie'
+    : s === 'interrupted' ? 'Pauza' : 'Strumień';
   if ('mediaSession' in navigator){
     try{ navigator.mediaSession.playbackState = active ? 'playing' : 'paused'; }catch(e){}
   }

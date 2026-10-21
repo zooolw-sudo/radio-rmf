@@ -18,6 +18,10 @@ import android.media.MediaMetadata;
 import android.media.MediaPlayer;
 import android.media.session.MediaSession;
 import android.media.session.PlaybackState;
+import android.net.ConnectivityManager;
+import android.net.Network;
+import android.net.NetworkCapabilities;
+import android.net.NetworkInfo;
 import android.net.Uri;
 import android.net.wifi.WifiManager;
 import android.os.Build;
@@ -25,6 +29,7 @@ import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
 import android.os.PowerManager;
+import android.os.SystemClock;
 import android.text.Html;
 
 import org.json.JSONArray;
@@ -63,6 +68,16 @@ public class RadioService extends Service {
     private static final int NOTIF_ID = 1;
     private static final int CONNECT_TIMEOUT_MS = 12000;
     private static final int STALL_TIMEOUT_MS = 20000;
+    private static final long CALL_POLL_MS = 1500;
+    private static final long LOST_WAIT_MS = 60_000;              // ile czekać, czy utrata dźwięku to rozmowa
+    private static final long PAUSE_MAX_MS = 3 * 60 * 60_000L;    // najdłuższa przerwa z automatycznym wznowieniem
+    private static final long NET_MAX_WAIT_MS = 15 * 60_000L;     // ile czekać na powrót internetu
+
+    // rodzaje przerwy w odtwarzaniu
+    private static final int PAUSE_NONE = 0;
+    private static final int PAUSE_MUTED = 1;   // krótka przerwa: strumień gra dalej, wyciszony
+    private static final int PAUSE_CALL = 2;    // rozmowa: strumień rozłączony, wznowienie po rozmowie
+    private static final int PAUSE_LOST = 3;    // inna aplikacja zabrała dźwięk: sprawdzamy, czy to rozmowa
 
     static volatile RadioService instance;
     static volatile Listener listener;
@@ -88,7 +103,17 @@ public class RadioService extends Service {
     private float userVolume = 1f;
     private float focusFactor = 1f;
     private WifiManager.WifiLock wifiLock;
+    private PowerManager.WakeLock cpuLock;
     private Bitmap art;
+
+    // przerwy (rozmowa) i brak internetu
+    private int pauseKind = PAUSE_NONE;
+    private boolean sawCall = false;
+    private int normalPolls = 0;
+    private long pauseStart = 0;
+    private long netWaitStart = 0;
+    private int netRetries = 0;
+    private boolean netOffline = false;
 
     // teraz gra
     private final ExecutorService net = Executors.newSingleThreadExecutor();
@@ -100,16 +125,27 @@ public class RadioService extends Service {
     private final Runnable metaPoll = this::pollMeta;
     private final Runnable timeout = this::fail;
     private final Runnable reopen = this::openCurrent;
+    private final Runnable callPoll = this::checkCall;
+    private final Runnable netRetry = this::retryNetwork;
 
     private final AudioManager.OnAudioFocusChangeListener focusListener = change -> {
         switch (change) {
             case AudioManager.AUDIOFOCUS_LOSS:
-                // inna aplikacja przejęła dźwięk na stałe (np. inny odtwarzacz)
-                stopPlayback("stopped");
+                // dźwięk zabrany na stałe: rozmowa (np. WhatsApp) albo inny odtwarzacz — sprawdzamy które
+                if (isActive() || pauseKind != PAUSE_NONE) enterPause(PAUSE_LOST);
                 break;
             case AudioManager.AUDIOFOCUS_LOSS_TRANSIENT:
-                focusFactor = 0f;      // np. rozmowa telefoniczna: wycisz, ale nie rozłączaj
-                applyVolume();
+                // chwilowa przerwa (dzwonek, rozmowa, asystent): wycisz i obserwuj, czy to rozmowa
+                if (isActive() && pauseKind == PAUSE_NONE) {
+                    pauseKind = PAUSE_MUTED;
+                    pauseStart = SystemClock.elapsedRealtime();
+                    sawCall = false;
+                    normalPolls = 0;
+                    focusFactor = 0f;
+                    applyVolume();
+                    main.removeCallbacks(callPoll);
+                    main.post(callPoll);
+                }
                 break;
             case AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK:
                 focusFactor = 0.25f;   // komunikat nawigacji: przycisz
@@ -117,7 +153,15 @@ public class RadioService extends Service {
                 break;
             case AudioManager.AUDIOFOCUS_GAIN:
                 focusFactor = 1f;
-                applyVolume();
+                if (pauseKind == PAUSE_MUTED) {
+                    pauseKind = PAUSE_NONE;
+                    main.removeCallbacks(callPoll);
+                    applyVolume();
+                } else if (pauseKind == PAUSE_CALL || pauseKind == PAUSE_LOST) {
+                    resumeAfterPause();   // rozmowa się skończyła
+                } else {
+                    applyVolume();
+                }
                 break;
             default:
                 break;
@@ -137,6 +181,12 @@ public class RadioService extends Service {
         if (wm != null) {
             wifiLock = wm.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "radiormf");
             wifiLock.setReferenceCounted(false);
+        }
+
+        PowerManager pm = (PowerManager) getSystemService(Context.POWER_SERVICE);
+        if (pm != null) {
+            cpuLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "radiormf:session");
+            cpuLock.setReferenceCounted(false);
         }
 
         createChannel();
@@ -179,7 +229,7 @@ public class RadioService extends Service {
             skip(-1);
         } else if (ACTION_RESUME.equals(a)) {
             resume();
-        } else if (!isActive()) {
+        } else if (!busy()) {
             stopSelf();
         }
         if (fg && stations.isEmpty()) stopPlayback("stopped");
@@ -188,7 +238,7 @@ public class RadioService extends Service {
 
     @Override
     public void onTaskRemoved(Intent rootIntent) {
-        if (!isActive()) stopSelf();
+        if (!busy()) stopSelf();
         super.onTaskRemoved(rootIntent);
     }
 
@@ -199,6 +249,7 @@ public class RadioService extends Service {
         releasePlayer();
         abandonFocus();
         if (wifiLock != null && wifiLock.isHeld()) wifiLock.release();
+        releaseCpu();
         if (session != null) session.release();
         if (instance == this) instance = null;
         super.onDestroy();
@@ -227,6 +278,8 @@ public class RadioService extends Service {
         JSONObject o = new JSONObject();
         try {
             o.put("ev", ev);
+            o.put("call", sawCall);
+            o.put("offline", netOffline);
             if (songT.isEmpty()) o.put("now", JSONObject.NULL);
             else {
                 JSONObject n = new JSONObject();
@@ -247,8 +300,15 @@ public class RadioService extends Service {
         return o.toString();
     }
 
+    /** Gra albo za chwilę zagra (łączy się, buforuje, czeka na internet). */
     private boolean isActive() {
-        return "playing".equals(state) || "connecting".equals(state) || "buffering".equals(state);
+        return "playing".equals(state) || "connecting".equals(state) || "buffering".equals(state)
+                || "waiting".equals(state);
+    }
+
+    /** Aktywne albo wstrzymane z automatycznym wznowieniem. */
+    private boolean busy() {
+        return isActive() || "interrupted".equals(state);
     }
 
     private Station current() {
@@ -299,6 +359,8 @@ public class RadioService extends Service {
     }
 
     private void resume() {
+        if ("interrupted".equals(state)) { resumeAfterPause(); return; }   // "graj" w trakcie przerwy: od razu
+        if ("waiting".equals(state)) { retryNetwork(); return; }
         if (isActive()) return;
         if (stations.isEmpty()) restoreFromPrefs();
         if (stations.isEmpty()) return;
@@ -319,28 +381,175 @@ public class RadioService extends Service {
     // ---------- odtwarzanie ----------
 
     private void startStation() {
-        main.removeCallbacks(timeout);
-        main.removeCallbacks(reopen);
-        releasePlayer();
+        haltStream();
+        main.removeCallbacks(callPoll);
+        pauseKind = PAUSE_NONE;
+        sawCall = false;
+        normalPolls = 0;
+        netWaitStart = 0;
+        netRetries = 0;
+        netOffline = false;
         if (current() == null) { stopPlayback("stopped"); return; }
         urlIdx = 0;
         hadPlayed = false;
         retried = false;
         focusFactor = 1f;
-        requestFocus();
-        if (wifiLock != null) wifiLock.acquire();
+        holdCpu();
         clearSong();
-        metaGen++;
-        main.removeCallbacks(metaPoll);
+        if (requestFocus() != AudioManager.AUDIOFOCUS_REQUEST_GRANTED) {
+            // trwa rozmowa: nie gramy teraz, wznowimy, gdy się skończy
+            sawCall = true;
+            pauseKind = PAUSE_CALL;
+            pauseStart = SystemClock.elapsedRealtime();
+            setState("interrupted");
+            main.postDelayed(callPoll, CALL_POLL_MS);
+            return;
+        }
+        if (wifiLock != null) wifiLock.acquire();
         openCurrent();
         main.post(metaPoll);
+    }
+
+    /** Zatrzymuje strumień i wszystkie zaplanowane próby, bez zmiany stanu. */
+    private void haltStream() {
+        main.removeCallbacks(timeout);
+        main.removeCallbacks(reopen);
+        main.removeCallbacks(netRetry);
+        main.removeCallbacks(metaPoll);
+        metaGen++;
+        releasePlayer();
+    }
+
+    // ---------- przerwy: rozmowa telefoniczna ----------
+
+    private void enterPause(int kind) {
+        haltStream();
+        if (wifiLock != null && wifiLock.isHeld()) wifiLock.release();
+        if (pauseKind == PAUSE_NONE || pauseKind == PAUSE_MUTED) {
+            if (pauseKind == PAUSE_NONE) {
+                pauseStart = SystemClock.elapsedRealtime();
+                sawCall = false;
+            }
+            normalPolls = 0;
+        }
+        // utrata na stałe w trakcie rozmowy nie zmienia tego, że czekamy na koniec rozmowy
+        if (!(pauseKind == PAUSE_CALL && kind == PAUSE_LOST)) pauseKind = kind;
+        holdCpu();
+        setState("interrupted");
+        main.removeCallbacks(callPoll);
+        main.postDelayed(callPoll, CALL_POLL_MS);
+    }
+
+    /** Co 1,5 s: czy trwa rozmowa, czy już się skończyła. */
+    private void checkCall() {
+        main.removeCallbacks(callPoll);
+        if (pauseKind == PAUSE_NONE) return;
+        long waited = SystemClock.elapsedRealtime() - pauseStart;
+        if (inCallMode()) {
+            normalPolls = 0;
+            if (!sawCall) {
+                sawCall = true;
+                if (pauseKind == PAUSE_MUTED) {
+                    // to rozmowa, a nie krótki komunikat: rozłącz strumień, połączymy się na nowo po rozmowie
+                    enterPause(PAUSE_CALL);
+                    return;
+                }
+                pauseKind = PAUSE_CALL;
+                publish(state);   // napis "na czas rozmowy"
+            }
+        } else if (sawCall && pauseKind == PAUSE_CALL) {
+            if (++normalPolls >= 2) { resumeAfterPause(); return; }   // rozmowa skończona
+        } else if (pauseKind == PAUSE_LOST && waited > LOST_WAIT_MS) {
+            // to nie była rozmowa, tylko inna aplikacja z dźwiękiem: zostawiamy ją w spokoju
+            stopPlayback("stopped");
+            return;
+        }
+        if (waited > PAUSE_MAX_MS) { stopPlayback("stopped"); return; }
+        main.postDelayed(callPoll, CALL_POLL_MS);
+    }
+
+    private void resumeAfterPause() {
+        main.removeCallbacks(callPoll);
+        pauseKind = PAUSE_NONE;
+        startStation();   // nowe połączenie, żeby grać na żywo, a nie od miejsca sprzed rozmowy
+    }
+
+    private boolean inCallMode() {
+        int m = am != null ? am.getMode() : AudioManager.MODE_NORMAL;
+        return m == AudioManager.MODE_RINGTONE || m == AudioManager.MODE_IN_CALL
+                || m == AudioManager.MODE_IN_COMMUNICATION || m == AudioManager.MODE_CALL_SCREENING
+                || m == AudioManager.MODE_CALL_REDIRECT || m == AudioManager.MODE_COMMUNICATION_REDIRECT;
+    }
+
+    // ---------- brak internetu ----------
+
+    @SuppressWarnings("deprecation")
+    private boolean isOnline() {
+        try {
+            ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
+            if (cm == null) return true;
+            if (Build.VERSION.SDK_INT >= 23) {
+                Network n = cm.getActiveNetwork();
+                if (n == null) return false;
+                NetworkCapabilities c = cm.getNetworkCapabilities(n);
+                return c == null || c.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET);
+            }
+            NetworkInfo i = cm.getActiveNetworkInfo();
+            return i != null && i.isConnected();
+        } catch (Exception e) {
+            return true;
+        }
+    }
+
+    /** Żaden serwer nie odpowiedział: czekamy na internet albo próbujemy jeszcze raz. */
+    private void allFailed() {
+        releasePlayer();
+        long now = SystemClock.elapsedRealtime();
+        if (netWaitStart == 0) netWaitStart = now;
+        netOffline = !isOnline();
+        if (now - netWaitStart > NET_MAX_WAIT_MS || (!netOffline && netRetries >= 2)) {
+            stopPlayback("failed");
+            return;
+        }
+        holdCpu();
+        setState("waiting");
+        main.removeCallbacks(netRetry);
+        main.postDelayed(netRetry, netOffline ? 3000 : 5000);
+    }
+
+    private void retryNetwork() {
+        main.removeCallbacks(netRetry);
+        if (current() == null || !"waiting".equals(state)) return;
+        boolean online = isOnline();
+        if (!online) {
+            if (!netOffline) { netOffline = true; publish(state); }
+            if (SystemClock.elapsedRealtime() - netWaitStart > NET_MAX_WAIT_MS) { stopPlayback("failed"); return; }
+            main.postDelayed(netRetry, 3000);
+            return;
+        }
+        if (netOffline) netOffline = false; else netRetries++;
+        urlIdx = 0;
+        hadPlayed = false;
+        retried = false;
+        if (wifiLock != null) wifiLock.acquire();
+        openCurrent();
+        main.removeCallbacks(metaPoll);
+        main.post(metaPoll);
+    }
+
+    private void holdCpu() {
+        try { if (cpuLock != null) cpuLock.acquire(PAUSE_MAX_MS + 60_000); } catch (Exception ignored) { }
+    }
+
+    private void releaseCpu() {
+        try { if (cpuLock != null && cpuLock.isHeld()) cpuLock.release(); } catch (Exception ignored) { }
     }
 
     private void openCurrent() {
         releasePlayer();
         Station st = current();
         if (st == null) { stopPlayback("stopped"); return; }
-        if (urlIdx >= st.urls.size()) { stopPlayback("failed"); return; }
+        if (urlIdx >= st.urls.size()) { allFailed(); return; }
 
         setState("connecting");
         main.removeCallbacks(timeout);
@@ -361,6 +570,9 @@ public class RadioService extends Service {
                 x.start();
                 hadPlayed = true;
                 retried = false;
+                netWaitStart = 0;
+                netRetries = 0;
+                netOffline = false;
                 setState("playing");
             });
             p.setOnErrorListener((x, what, extra) -> {
@@ -394,8 +606,9 @@ public class RadioService extends Service {
     private void fail() {
         main.removeCallbacks(timeout);
         main.removeCallbacks(reopen);
-        if (current() == null) return;
+        if (current() == null || pauseKind == PAUSE_CALL || pauseKind == PAUSE_LOST) return;
         releasePlayer();
+        if (!isOnline()) { allFailed(); return; }   // np. tunel albo rozmowa bez internetu: czekaj na zasięg
         if (hadPlayed && !retried) {
             // grało i przerwało: jeszcze raz ten sam serwer
             retried = true;
@@ -411,14 +624,15 @@ public class RadioService extends Service {
     }
 
     private void stopPlayback(String finalState) {
-        main.removeCallbacks(timeout);
-        main.removeCallbacks(reopen);
-        main.removeCallbacks(metaPoll);
-        metaGen++;
+        haltStream();
+        main.removeCallbacks(callPoll);
+        pauseKind = PAUSE_NONE;
+        sawCall = false;
+        netOffline = false;
         clearSong();
-        releasePlayer();
         abandonFocus();
         if (wifiLock != null && wifiLock.isHeld()) wifiLock.release();
+        releaseCpu();
         setState(finalState);
         if (Build.VERSION.SDK_INT >= 24) stopForeground(STOP_FOREGROUND_DETACH);
         else stopForeground(false);
@@ -444,21 +658,26 @@ public class RadioService extends Service {
         try { p.setVolume(v, v); } catch (IllegalStateException ignored) { }
     }
 
-    private void requestFocus() {
-        if (Build.VERSION.SDK_INT >= 26) {
-            if (focusRequest == null) {
-                focusRequest = new AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
-                        .setAudioAttributes(new AudioAttributes.Builder()
-                                .setUsage(AudioAttributes.USAGE_MEDIA)
-                                .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
-                                .build())
-                        .setOnAudioFocusChangeListener(focusListener, main)
-                        .setWillPauseWhenDucked(false)
-                        .build();
+    @SuppressWarnings("deprecation")
+    private int requestFocus() {
+        try {
+            if (Build.VERSION.SDK_INT >= 26) {
+                if (focusRequest == null) {
+                    focusRequest = new AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
+                            .setAudioAttributes(new AudioAttributes.Builder()
+                                    .setUsage(AudioAttributes.USAGE_MEDIA)
+                                    .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+                                    .build())
+                            .setOnAudioFocusChangeListener(focusListener, main)
+                            .setAcceptsDelayedFocusGain(true)   // w trakcie rozmowy: dostaniemy dźwięk po jej końcu
+                            .setWillPauseWhenDucked(false)
+                            .build();
+                }
+                return am.requestAudioFocus(focusRequest);
             }
-            am.requestAudioFocus(focusRequest);
-        } else {
-            am.requestAudioFocus(focusListener, AudioManager.STREAM_MUSIC, AudioManager.AUDIOFOCUS_GAIN);
+            return am.requestAudioFocus(focusListener, AudioManager.STREAM_MUSIC, AudioManager.AUDIOFOCUS_GAIN);
+        } catch (Exception e) {
+            return AudioManager.AUDIOFOCUS_REQUEST_GRANTED;
         }
     }
 
@@ -613,6 +832,8 @@ public class RadioService extends Service {
             case "connecting": return "Łączę…";
             case "buffering": return "Buforuję…";
             case "failed": return "Brak połączenia — spróbuj ponownie";
+            case "interrupted": return sawCall ? "Wstrzymane na czas rozmowy" : "Wstrzymane — wznowię automatycznie";
+            case "waiting": return netOffline ? "Brak internetu — czekam na zasięg" : "Ponawiam połączenie…";
             default: return "Zatrzymane";
         }
     }
@@ -625,6 +846,8 @@ public class RadioService extends Service {
             case "connecting": ps = PlaybackState.STATE_CONNECTING; break;
             case "buffering": ps = PlaybackState.STATE_BUFFERING; break;
             case "failed": ps = PlaybackState.STATE_ERROR; break;
+            case "interrupted": ps = PlaybackState.STATE_PAUSED; break;
+            case "waiting": ps = PlaybackState.STATE_CONNECTING; break;
             default: ps = PlaybackState.STATE_STOPPED; break;
         }
         PlaybackState.Builder b = new PlaybackState.Builder()
@@ -691,7 +914,7 @@ public class RadioService extends Service {
                 .setContentText(song ? (songA.isEmpty() ? stName : songA + " · " + stName) : statusLabel())
                 .setContentIntent(PendingIntent.getActivity(this, 0, open, piFlags()))
                 .setDeleteIntent(serviceIntent(ACTION_STOP, 1, false))
-                .setOngoing(active)
+                .setOngoing(busy())
                 .setShowWhen(false)
                 .setVisibility(Notification.VISIBILITY_PUBLIC)
                 .addAction(android.R.drawable.ic_media_previous, "Poprzednia", serviceIntent(ACTION_PREV, 2, true))
