@@ -5,6 +5,8 @@ import android.app.Activity;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.content.res.Configuration;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
@@ -14,9 +16,16 @@ import android.view.WindowInsets;
 import android.view.WindowInsetsController;
 import android.view.WindowManager;
 import android.webkit.JavascriptInterface;
+import android.webkit.WebResourceRequest;
+import android.webkit.WebResourceResponse;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
+
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.util.HashMap;
+import java.util.Map;
 
 /**
  * Ekran aplikacji: ten sam interfejs co wersja internetowa (z assets),
@@ -27,6 +36,11 @@ public class MainActivity extends Activity {
     private WebView web;
     private RadioService.Listener myListener;
     private volatile boolean fullscreen = true;
+
+    /** Wymyślony adres, który obsługuje sama aplikacja (okładki i obrazek testowy). */
+    static final String LOCAL_HOST = "radio-rmf.local";
+    private String imgDefaults = "";
+    private byte[] testPng;
 
     @SuppressLint({"SetJavaScriptEnabled", "AddJavascriptInterface"})
     @Override
@@ -43,8 +57,40 @@ public class MainActivity extends Activity {
         s.setJavaScriptEnabled(true);
         s.setDomStorageEnabled(true);
         s.setMediaPlaybackRequiresUserGesture(false);
+        // niektóre radia mają obrazki w przeglądarce systemu domyślnie wyłączone — włączamy je jawnie
+        imgDefaults = "obrazki " + (s.getLoadsImagesAutomatically() ? "wł." : "WYŁĄCZONE")
+                + (s.getBlockNetworkImage() ? ", z sieci ZABLOKOWANE" : "")
+                + (s.getBlockNetworkLoads() ? ", sieć ZABLOKOWANA" : "");
+        s.setLoadsImagesAutomatically(true);
+        s.setBlockNetworkImage(false);
+        s.setBlockNetworkLoads(false);
+        s.setAllowFileAccess(true);
+        s.setAllowContentAccess(true);
         web.addJavascriptInterface(new Bridge(), "AndroidRadio");
         web.setWebViewClient(new WebViewClient() {
+            @Override
+            public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
+                Uri u = request.getUrl();
+                if (u == null || !LOCAL_HOST.equals(u.getHost())) return null;
+                String path = u.getPath() != null ? u.getPath() : "";
+                byte[] body = null;
+                String type = "image/jpeg";
+                if (path.startsWith("/okladka/")) {
+                    RadioService svc = RadioService.instance;
+                    if (svc != null) { body = svc.coverFile(); type = svc.coverFileMime(); }
+                } else if (path.startsWith("/test")) {
+                    body = testImage();
+                    type = "image/png";
+                }
+                Map<String, String> h = new HashMap<>();
+                h.put("Cache-Control", "no-store");
+                h.put("Access-Control-Allow-Origin", "*");
+                if (body == null) {
+                    return new WebResourceResponse("text/plain", "utf-8", 404, "Not Found", h, new ByteArrayInputStream(new byte[0]));
+                }
+                return new WebResourceResponse(type, null, 200, "OK", h, new ByteArrayInputStream(body));
+            }
+
             @SuppressWarnings("deprecation")
             @Override
             public boolean shouldOverrideUrlLoading(WebView view, String url) {
@@ -80,6 +126,20 @@ public class MainActivity extends Activity {
                 web.evaluateJavascript("window.__radio&&window.__radio(" + json + ")", null);
             }
         }
+    }
+
+    private synchronized byte[] testImage() {
+        if (testPng == null) {
+            try {
+                Bitmap b = BitmapFactory.decodeResource(getResources(), R.mipmap.ic_launcher);
+                ByteArrayOutputStream o = new ByteArrayOutputStream();
+                b.compress(Bitmap.CompressFormat.PNG, 100, o);
+                testPng = o.toByteArray();
+            } catch (Exception e) {
+                testPng = new byte[0];
+            }
+        }
+        return testPng.length > 0 ? testPng : null;
     }
 
     @Override
@@ -204,7 +264,8 @@ public class MainActivity extends Activity {
             try { ver = getPackageManager().getPackageInfo(getPackageName(), 0).versionName; } catch (Exception ignored) { }
             String sys = "Aplikacja " + ver
                     + "\nSystem: Android " + Build.VERSION.RELEASE + " (API " + Build.VERSION.SDK_INT + ")"
-                    + "\nUrządzenie: " + Build.MANUFACTURER + " " + Build.MODEL;
+                    + "\nUrządzenie: " + Build.MANUFACTURER + " " + Build.MODEL
+                    + "\nPrzeglądarka systemu (przed zmianą): " + imgDefaults;
             RadioService svc = RadioService.instance;
             return sys + "\n" + (svc != null ? svc.diagText() : "Odtwarzacz jeszcze nie uruchomiony — włącz stację.");
         }

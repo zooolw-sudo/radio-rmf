@@ -136,6 +136,9 @@ public class RadioService extends Service {
     private String songA = "", songT = "", songC = "", nextA = "", nextT = "";
     private String coverLoaded = "";
     private String coverData = "";          // okładka jako data: URI dla ekranu aplikacji
+    private volatile byte[] coverBytes;     // ta sama okładka jako plik pod adresem aplikacji
+    private volatile String coverMime = "image/jpeg";
+    private volatile int coverSeq = 0;
     private SSLSocketFactory extraTls;      // tylko wątek "net"
     private String ua = "Mozilla/5.0 (Linux; Android " + Build.VERSION.RELEASE + ") RadioRMF/1.0";
 
@@ -311,6 +314,9 @@ public class RadioService extends Service {
                 JSONObject n = new JSONObject();
                 n.put("a", songA); n.put("t", songT); n.put("c", songC);
                 n.put("na", nextA); n.put("nt", nextT);
+                byte[] cb = coverBytes;
+                if (cb != null) n.put("imgUrl", "https://" + MainActivity.LOCAL_HOST + "/okladka/" + coverSeq
+                        + ("image/png".equals(coverMime) ? ".png" : ".jpg"));
                 if (!coverData.isEmpty()) n.put("img", coverData);
                 o.put("now", n);
             }
@@ -739,6 +745,7 @@ public class RadioService extends Service {
         songA = songT = songC = nextA = nextT = "";
         cover = null;
         coverData = "";
+        coverBytes = null;
         coverLoaded = "";
     }
 
@@ -795,6 +802,7 @@ public class RadioService extends Service {
                 // nowy utwór: stara okładka znika od razu, nowa dochodzi, gdy się pobierze
                 cover = null;
                 coverData = "";
+                coverBytes = null;
                 coverLoaded = c;
                 if (!c.isEmpty()) loadCover(c);
                 changed = true;
@@ -814,6 +822,8 @@ public class RadioService extends Service {
                 Fetched f = fetch(url, 512 * 1024, log);
                 Bitmap bmp = null;
                 String data = "";
+                byte[] encoded = null;
+                boolean isPng = false;
                 if (f != null) {
                     bmp = BitmapFactory.decodeByteArray(f.body, 0, f.body.length);
                     if (bmp != null) {
@@ -822,7 +832,9 @@ public class RadioService extends Service {
                         boolean png = bmp.hasAlpha();
                         ByteArrayOutputStream enc = new ByteArrayOutputStream();
                         if (bmp.compress(png ? Bitmap.CompressFormat.PNG : Bitmap.CompressFormat.JPEG, 88, enc)) {
-                            data = "data:image/" + (png ? "png" : "jpeg") + ";base64," + Base64.encodeToString(enc.toByteArray(), Base64.NO_WRAP);
+                            encoded = enc.toByteArray();
+                            isPng = png;
+                            data = "data:image/" + (png ? "png" : "jpeg") + ";base64," + Base64.encodeToString(encoded, Base64.NO_WRAP);
                         }
                         log.append(", ").append(bmp.getWidth()).append("×").append(bmp.getHeight()).append(" px")
                                 .append(", źródło ").append(f.type).append(" ").append(f.body.length / 1024).append(" kB")
@@ -834,10 +846,15 @@ public class RadioService extends Service {
                 diagCover = now() + " " + url.replaceFirst("^https?://", "") + ": " + log;
                 final Bitmap rb = bmp;
                 final String rd = data;
+                final byte[] re = encoded;
+                final boolean rp = isPng;
                 main.post(() -> {
                     if (gen != metaGen || !url.equals(coverLoaded)) return;
                     cover = rb;
                     coverData = rd;
+                    coverMime = rp ? "image/png" : "image/jpeg";
+                    coverSeq++;
+                    coverBytes = re;
                     if (rb != null) publish("meta");
                 });
             });
@@ -858,6 +875,10 @@ public class RadioService extends Service {
         if (m != null && m.length() > 90) m = m.substring(0, 90) + "…";
         return e.getClass().getSimpleName() + (m != null ? " (" + m + ")" : "");
     }
+
+    /** Okładka dla ekranu aplikacji (adres https://radio-rmf.local/okladka/…). */
+    byte[] coverFile() { return coverBytes; }
+    String coverFileMime() { return coverMime; }
 
     /** Tekst do sekcji Diagnostyka. */
     String diagText() {

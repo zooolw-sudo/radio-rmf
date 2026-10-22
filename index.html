@@ -766,7 +766,11 @@ function showTrack(info){
    a widoczny obrazek podmieniamy dopiero po udanym wczytaniu. Dzięki temu spóźniony
    błąd poprzedniej próby (stare przeglądarki w radiach) nie ukryje dobrej okładki. */
 var coverDiag = 'jeszcze nie było okładki', coverLog = [], coverReq = 0, coverSong = '', coverKey = '';
-function srcKind(u){ return /^data:/.test(u) ? 'obrazek z aplikacji' : String(u).replace(/^(https?):\/\/([^\/]+).*$/, '$1 $2'); }
+function srcKind(u){
+  if (/^data:/.test(u)) return 'obrazek w tekście';
+  if (/^https?:\/\/radio-rmf\.local\//.test(u)) return 'plik z aplikacji';
+  return String(u).replace(/^(https?):\/\/([^\/]+).*$/, '$1 $2');
+}
 function showCoverEl(on){ $('cover').hidden = !on; $('track').classList.toggle('no-cover', !on); }
 function setCover(info){
   var song = info ? (info.c || '') + '|' + (info.t || '') : '';
@@ -777,11 +781,12 @@ function setCover(info){
   }
   if (!info) return;
   // w aplikacji na Androida okładkę pobiera sama aplikacja i przekazuje gotowy obrazek (img)
+  // kolejność: plik podany przez aplikację, obrazek w tekście, internet (https, w aplikacji też http)
   var cands = [];
+  if (info.imgUrl) cands.push(info.imgUrl);
   if (info.img) cands.push(info.img);
-  else if (info.c){
+  if (info.c){
     cands.push(info.c);
-    // w aplikacji spróbuj jeszcze zwykłym http
     if (location.protocol !== 'https:' && /^https:\/\//.test(info.c)) cands.push('http://' + info.c.slice(8));
   }
   var key = cands.join('|');
@@ -856,18 +861,40 @@ if (NATIVE && typeof NATIVE.setFullscreen === 'function'){
 }
 
 /* ---------- diagnostyka (tylko aplikacja na Androida) ---------- */
+var imgTest = 'trwa…', imgTestRun = 0;
+function testImages(){
+  var tests = [
+    ['plik w aplikacji', 'icon-192.png'],
+    ['data PNG', 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAFklEQVR4nGM8YaPBwMDAxMDAwMDAAAAO2gEw4EkwjwAAAABJRU5ErkJggg=='],
+    ['data JPEG', 'data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAYEBQYFBAYGBQYHBwYIChAKCgkJChQODwwQFxQYGBcUFhYaHSUfGhsjHBYWICwgIyYnKSopGR8tMC0oMCUoKSj/2wBDAQcHBwoIChMKChMoGhYaKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCj/wAARCAAIAAgDASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwDmqKKK+YP1I//Z'],
+    ['adres aplikacji', 'https://radio-rmf.local/test.png?' + Date.now()]
+  ];
+  if (lastTrack && lastTrack.c) tests.push(['internet', lastTrack.c + (lastTrack.c.indexOf('?') < 0 ? '?' : '&') + 't=' + Date.now()]);
+  var run = ++imgTestRun, res = [];
+  tests.forEach(function(t, i){
+    res[i] = t[0] + ': …';
+    var im = new Image(), done = false;
+    var finish = function(r){ if (done || run !== imgTestRun) return; done = true; res[i] = t[0] + ': ' + r; imgTest = res.join(' · '); };
+    im.onload = function(){ finish('OK (' + im.naturalWidth + ' px)'); };
+    im.onerror = function(){ finish('błąd'); };
+    setTimeout(function(){ finish('brak odpowiedzi'); }, 8000);
+    im.src = t[1];
+  });
+  imgTest = res.join(' · ');
+}
 function renderDiag(){
   var t = '';
   try{ t = NATIVE.diag(); }catch(e){ t = 'Nie udało się odczytać: ' + e; }
   var m = navigator.userAgent.match(/Chrome\/([\d.]+)/);
   t += '\nWebView: ' + (m ? 'Chrome ' + m[1] : navigator.userAgent);
   t += '\nOkładka na ekranie: ' + coverDiag;
+  t += '\nTest obrazków: ' + imgTest;
   $('diagOut').textContent = t;
 }
 if (NATIVE && typeof NATIVE.diag === 'function'){
   $('diagBox').hidden = false;
-  $('diagBox').addEventListener('toggle', function(){ if (this.open) renderDiag(); });
-  $('diagRefresh').addEventListener('click', renderDiag);
+  $('diagBox').addEventListener('toggle', function(){ if (this.open){ testImages(); renderDiag(); setTimeout(renderDiag, 1500); } });
+  $('diagRefresh').addEventListener('click', function(){ testImages(); renderDiag(); setTimeout(renderDiag, 1500); });
   setInterval(function(){ if ($('diagBox').open) renderDiag(); }, 5000);
 }
 
