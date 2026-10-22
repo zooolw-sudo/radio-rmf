@@ -32,6 +32,7 @@ import android.os.PowerManager;
 import android.os.SystemClock;
 import android.text.Html;
 import android.util.Base64;
+import android.webkit.WebSettings;
 
 import org.json.JSONArray;
 import org.json.JSONException;
@@ -45,7 +46,10 @@ import java.nio.charset.StandardCharsets;
 import java.security.KeyStore;
 import java.security.cert.Certificate;
 import java.security.cert.CertificateFactory;
+import java.text.SimpleDateFormat;
 import java.util.ArrayList;
+import java.util.Date;
+import java.util.Locale;
 import java.util.Enumeration;
 import java.util.HashMap;
 import java.util.List;
@@ -133,6 +137,11 @@ public class RadioService extends Service {
     private String coverLoaded = "";
     private String coverData = "";          // okładka jako data: URI dla ekranu aplikacji
     private SSLSocketFactory extraTls;      // tylko wątek "net"
+    private String ua = "Mozilla/5.0 (Linux; Android " + Build.VERSION.RELEASE + ") RadioRMF/1.0";
+
+    // diagnostyka (Ustawienia → Diagnostyka)
+    volatile String diagPlaylist = "jeszcze nie pobierano";
+    volatile String diagCover = "jeszcze nie pobierano";
     private boolean extraTlsTried = false;
     private Bitmap cover;
 
@@ -196,6 +205,9 @@ public class RadioService extends Service {
             wifiLock = wm.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "radiormf");
             wifiLock.setReferenceCounted(false);
         }
+
+        // serwery RMF widzą nas jak zwykłą przeglądarkę (niektóre odrzucają nietypowe aplikacje)
+        try { ua = WebSettings.getDefaultUserAgent(this); } catch (Exception ignored) { }
 
         PowerManager pm = (PowerManager) getSystemService(Context.POWER_SERVICE);
         if (pm != null) {
@@ -737,7 +749,9 @@ public class RadioService extends Service {
         final String url = "https://www.rmfon.pl/stacje/playlista_" + st.rid + ".json.txt";
         try {
             net.execute(() -> {
-                final String body = httpText(url);
+                StringBuilder log = new StringBuilder();
+                final String body = httpText(url, log);
+                diagPlaylist = now() + " stacja " + st.rid + ": " + log;
                 main.post(() -> {
                     if (gen != metaGen) return;
                     long wait = body != null ? applyPlaylist(body) : 30000;
@@ -796,7 +810,8 @@ public class RadioService extends Service {
         final int gen = metaGen;
         try {
             net.execute(() -> {
-                Fetched f = fetch(url, 512 * 1024);
+                StringBuilder log = new StringBuilder();
+                Fetched f = fetch(url, 512 * 1024, log);
                 Bitmap bmp = null;
                 String data = "";
                 if (f != null) {
@@ -804,8 +819,12 @@ public class RadioService extends Service {
                     if (bmp != null) {
                         String type = f.type != null && f.type.startsWith("image/") ? f.type.split(";")[0].trim() : "image/jpeg";
                         data = "data:" + type + ";base64," + Base64.encodeToString(f.body, Base64.NO_WRAP);
+                        log.append(", ").append(bmp.getWidth()).append("×").append(bmp.getHeight()).append(" px");
+                    } else {
+                        log.append(", nie da się odczytać obrazka (").append(f.type).append(", ").append(f.body.length).append(" B)");
                     }
                 }
+                diagCover = now() + " " + url.replaceFirst("^https?://", "") + ": " + log;
                 final Bitmap rb = bmp;
                 final String rd = data;
                 main.post(() -> {
@@ -818,9 +837,29 @@ public class RadioService extends Service {
         } catch (Exception ignored) { }
     }
 
-    private String httpText(String url) {
-        Fetched f = fetch(url, 1024 * 1024);
+    private String httpText(String url, StringBuilder log) {
+        Fetched f = fetch(url, 1024 * 1024, log);
         return f != null ? new String(f.body, StandardCharsets.UTF_8) : null;
+    }
+
+    private static String now() {
+        return new SimpleDateFormat("HH:mm:ss", Locale.ROOT).format(new Date());
+    }
+
+    private static String brief(Exception e) {
+        String m = e.getMessage();
+        if (m != null && m.length() > 90) m = m.substring(0, 90) + "…";
+        return e.getClass().getSimpleName() + (m != null ? " (" + m + ")" : "");
+    }
+
+    /** Tekst do sekcji Diagnostyka. */
+    String diagText() {
+        Station st = current();
+        return "Stan: " + state + (st != null ? " · " + st.name + " (nr RMF ON " + st.rid + ")" : "")
+                + "\nTeraz gra: " + (songT.isEmpty() ? "brak danych" : songA + " – " + songT)
+                + "\nTytuły: " + diagPlaylist
+                + "\nOkładka (aplikacja): " + diagCover
+                + "\nOkładka przekazana na ekran: " + (coverData.isEmpty() ? "nie" : "tak (" + coverData.length() / 1024 + " kB)");
     }
 
     private static final class Fetched {
@@ -833,49 +872,63 @@ public class RadioService extends Service {
      * (np. Let's Encrypt), więc przy błędzie certyfikatu ponawiamy z dołączonymi certyfikatami
      * głównymi, a na końcu próbujemy zwykłym http.
      */
-    private Fetched fetch(String url, int maxBytes) {
-        Fetched f = fetchOnce(url, maxBytes, false, 0);
-        if (f == null && url.startsWith("https://")) f = fetchOnce("http://" + url.substring(8), maxBytes, false, 0);
+    private Fetched fetch(String url, int maxBytes, StringBuilder log) {
+        log.append(url.startsWith("https://") ? "https " : "http ");
+        Fetched f = fetchOnce(url, maxBytes, false, 0, log);
+        if (f == null && url.startsWith("https://")) {
+            log.append(" → http ");
+            f = fetchOnce("http://" + url.substring(8), maxBytes, false, 0, log);
+        }
         return f;
     }
 
-    private Fetched fetchOnce(String url, int maxBytes, boolean extraTrust, int hops) {
+    private Fetched fetchOnce(String url, int maxBytes, boolean extraTrust, int hops, StringBuilder log) {
         HttpURLConnection c = null;
         try {
             c = (HttpURLConnection) new URL(url).openConnection();
             if (extraTrust && c instanceof HttpsURLConnection) {
                 SSLSocketFactory tls = extraTlsFactory();
-                if (tls == null) return null;
+                if (tls == null) { log.append("brak dodatkowych certyfikatów"); return null; }
                 ((HttpsURLConnection) c).setSSLSocketFactory(tls);
             }
             c.setConnectTimeout(8000);
             c.setReadTimeout(8000);
             c.setInstanceFollowRedirects(true);
-            c.setRequestProperty("User-Agent", "RadioRMF-Android/1.0");
+            c.setRequestProperty("User-Agent", ua);
+            c.setRequestProperty("Accept", url.contains(".json") ? "application/json,text/plain,*/*" : "image/jpeg,image/png,image/webp,image/*;q=0.8,*/*;q=0.5");
+            c.setRequestProperty("Accept-Language", "pl-PL,pl;q=0.9");
             int code = c.getResponseCode();
             if (code >= 300 && code < 400 && hops < 3) {
                 // przekierowanie między http a https Android sam nie wykonuje
                 String loc = c.getHeaderField("Location");
+                log.append(code).append("→");
                 if (loc == null) return null;
-                return fetchOnce(new URL(new URL(url), loc).toString(), maxBytes, extraTrust, hops + 1);
+                String next = new URL(new URL(url), loc).toString();
+                log.append(next.startsWith("https://") ? "https " : "http ");
+                return fetchOnce(next, maxBytes, extraTrust, hops + 1, log);
             }
-            if (code != 200) return null;
+            if (code != 200) { log.append("HTTP ").append(code); return null; }
             try (InputStream in = c.getInputStream()) {
                 ByteArrayOutputStream out = new ByteArrayOutputStream();
                 byte[] buf = new byte[8192];
                 int n;
                 while ((n = in.read(buf)) > 0) {
                     out.write(buf, 0, n);
-                    if (out.size() > maxBytes) return null;
+                    if (out.size() > maxBytes) { log.append("plik za duży"); return null; }
                 }
                 Fetched r = new Fetched();
                 r.body = out.toByteArray();
                 r.type = c.getContentType();
+                log.append("OK").append(extraTrust ? " (z dodatkowymi certyfikatami)" : "");
                 return r;
             }
         } catch (SSLException e) {
-            return extraTrust ? null : fetchOnce(url, maxBytes, true, hops);
+            log.append("błąd SSL: ").append(brief(e));
+            if (extraTrust) return null;
+            log.append(" → z dodatkowymi certyfikatami ");
+            return fetchOnce(url, maxBytes, true, hops, log);
         } catch (Exception e) {
+            log.append("błąd: ").append(brief(e));
             return null;
         } finally {
             if (c != null) c.disconnect();

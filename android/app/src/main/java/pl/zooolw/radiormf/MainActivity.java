@@ -134,6 +134,17 @@ public class MainActivity extends Activity {
         }
 
         @JavascriptInterface
+        public String diag() {
+            String ver = "?";
+            try { ver = getPackageManager().getPackageInfo(getPackageName(), 0).versionName; } catch (Exception ignored) { }
+            String sys = "Aplikacja " + ver
+                    + "\nSystem: Android " + Build.VERSION.RELEASE + " (API " + Build.VERSION.SDK_INT + ")"
+                    + "\nUrządzenie: " + Build.MANUFACTURER + " " + Build.MODEL;
+            RadioService svc = RadioService.instance;
+            return sys + "\n" + (svc != null ? svc.diagText() : "Odtwarzacz jeszcze nie uruchomiony — włącz stację.");
+        }
+
+        @JavascriptInterface
         public String state() {
             RadioService svc = RadioService.instance;
             return svc != null ? svc.stateJson() : "{}";

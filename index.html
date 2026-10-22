@@ -237,6 +237,11 @@ h2{margin:0;font:500 12px var(--f-mono);text-transform:uppercase;letter-spacing:
 .chip[aria-pressed="true"]{background:var(--ink);color:var(--panel);border-color:var(--ink)}
 .chip small{font:11px var(--f-mono);opacity:.75;margin-left:4px}
 .setting-note{font:12px var(--f-mono);color:var(--muted);font-variant-numeric:tabular-nums}
+.diag summary{cursor:pointer}
+.diag-out{
+  margin:0; padding:10px 12px; border-radius:10px; border:1px solid var(--line); background:var(--bg);
+  font:12px/1.55 var(--f-mono); color:var(--muted); white-space:pre-wrap; overflow-wrap:anywhere;
+}
 
 footer{font:12px/1.6 var(--f-mono);color:var(--muted);display:grid;gap:4px}
 .player,.side{display:grid;gap:22px;min-width:0}
@@ -372,6 +377,11 @@ kbd{font:inherit;border:1px solid var(--line);border-bottom-width:2px;border-rad
         </div>
         <span class="setting-note" id="sleepNote">Radio gra, dopóki go nie zatrzymasz.</span>
       </div>
+      <details class="setting diag" id="diagBox" hidden>
+        <summary class="setting-label">Diagnostyka</summary>
+        <pre class="diag-out" id="diagOut">Włącz stację, a potem otwórz tę sekcję.</pre>
+        <div><button class="btn-text" type="button" id="diagRefresh">Odśwież</button></div>
+      </details>
     </div>
   </section>
   </div>
@@ -716,9 +726,15 @@ function showTrack(info){
   box.hidden = false;
   setMediaMeta();
 }
-$('cover').addEventListener('load', function(){ this.dataset.state = 'ok'; });
+var coverDiag = 'jeszcze nie było okładki';
+function srcKind(u){ return /^data:/.test(u) ? 'obrazek z aplikacji' : String(u).replace(/^(https?):\/\/([^\/]+).*$/, '$1 $2'); }
+$('cover').addEventListener('load', function(){
+  this.dataset.state = 'ok';
+  coverDiag = 'wczytana (' + srcKind(this.getAttribute('src') || '') + ')';
+});
 $('cover').addEventListener('error', function(){
   var cur = this.getAttribute('src') || '';
+  coverDiag = 'błąd (' + srcKind(cur) + ')';
   // w aplikacji spróbuj jeszcze zwykłym http: starsze radia nie ufają nowszym certyfikatom
   if (location.protocol !== 'https:' && /^https:\/\//.test(cur)){ this.src = 'http://' + cur.slice(8); return; }
   this.dataset.state = 'failed';
@@ -747,6 +763,22 @@ function pollMeta(){
     metaFails++;
     if (metaFails < 3) metaTimer = setTimeout(pollMeta, 30000);   // potem cisza do następnej zmiany stacji
   });
+}
+
+/* ---------- diagnostyka (tylko aplikacja na Androida) ---------- */
+function renderDiag(){
+  var t = '';
+  try{ t = NATIVE.diag(); }catch(e){ t = 'Nie udało się odczytać: ' + e; }
+  var m = navigator.userAgent.match(/Chrome\/([\d.]+)/);
+  t += '\nWebView: ' + (m ? 'Chrome ' + m[1] : navigator.userAgent);
+  t += '\nOkładka na ekranie: ' + coverDiag;
+  $('diagOut').textContent = t;
+}
+if (NATIVE && typeof NATIVE.diag === 'function'){
+  $('diagBox').hidden = false;
+  $('diagBox').addEventListener('toggle', function(){ if (this.open) renderDiag(); });
+  $('diagRefresh').addEventListener('click', renderDiag);
+  setInterval(function(){ if ($('diagBox').open) renderDiag(); }, 5000);
 }
 
 /* ---------- motyw ---------- */
