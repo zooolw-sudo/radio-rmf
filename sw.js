@@ -1,6 +1,6 @@
 // Service worker: trzyma kopię aplikacji, żeby otwierała się od razu.
 // Strumieni radia nie dotyka (to inne serwery), więc nie wpływa na odtwarzanie.
-const CACHE = 'radio-rmf-v5';
+const CACHE = 'radio-rmf-v6';
 const FILES = ['./', './index.html', './manifest.webmanifest', './icon-192.png', './icon-512.png', './apple-touch-icon.png'];
 
 self.addEventListener('install', e => {

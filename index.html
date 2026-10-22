@@ -65,8 +65,9 @@ button,input{font:inherit;color:inherit}
 [hidden]{display:none!important}
 
 .app{
-  max-width:560px; margin:0 auto; display:grid; gap:22px;
-  padding-block:20px 40px;
+  max-width:560px; margin:0 auto; display:grid; grid-gap:22px; gap:22px;
+  padding-top:20px; padding-bottom:40px; padding-block:20px 40px;
+  padding-left:16px; padding-right:16px;
   padding-left:max(16px,env(safe-area-inset-left,0px));
   padding-right:max(16px,env(safe-area-inset-right,0px));
 }
@@ -86,15 +87,15 @@ button,input{font:inherit;color:inherit}
 
 /* Teraz gra */
 .track{
-  display:grid; grid-template-columns:64px minmax(0,1fr); gap:14px; align-items:center;
+  display:grid; grid-template-columns:64px minmax(0,1fr); grid-gap:14px; gap:14px; align-items:center;
   padding:12px; border-radius:12px; background:var(--bg); border:1px solid var(--line);
 }
 .track.no-cover{grid-template-columns:minmax(0,1fr)}
 .cover{width:64px;height:64px;border-radius:8px;object-fit:cover;background:var(--line);display:block}
-.track-text{min-width:0;display:grid;gap:1px}
+.track-text{min-width:0;display:grid;grid-gap:1px; gap:1px}
 .track-label{font:500 11px var(--f-mono);text-transform:uppercase;letter-spacing:.12em;color:var(--accent)}
-.track-title{font-weight:600;font-size:17px;line-height:1.25;overflow-wrap:anywhere}
-.track-artist{color:var(--muted);overflow-wrap:anywhere}
+.track-title{font-weight:600;font-size:17px;line-height:1.25;word-wrap:break-word; overflow-wrap:anywhere}
+.track-artist{color:var(--muted);word-wrap:break-word; overflow-wrap:anywhere}
 .track-next{font:12px var(--f-mono);color:var(--muted);margin-top:5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 
 /* Skala odbiornika */
@@ -105,7 +106,7 @@ button,input{font:inherit;color:inherit}
   box-shadow:inset 0 0 0 1px var(--glass-line), inset 0 14px 30px rgba(0,0,0,.45);
 }
 .dial::after{
-  content:""; position:absolute; inset:0; pointer-events:none;
+  content:""; position:absolute; top:0; right:0; bottom:0; left:0; inset:0; pointer-events:none;
   background:linear-gradient(180deg,rgba(255,255,255,.07),rgba(255,255,255,0) 45%);
 }
 .scale{position:relative;height:86px}
@@ -144,11 +145,11 @@ button,input{font:inherit;color:inherit}
 /* Panel odtwarzania */
 .now{
   background:var(--panel); border:1px solid var(--line); border-radius:14px;
-  padding:20px; display:grid; gap:16px;
+  padding:20px; display:grid; grid-gap:16px; gap:16px;
 }
 .station-name{
   margin:0; font:800 clamp(36px,10vw,52px)/.95 var(--f-display);
-  text-transform:uppercase; letter-spacing:.02em; text-wrap:balance; overflow-wrap:anywhere;
+  text-transform:uppercase; letter-spacing:.02em; text-wrap:balance; word-wrap:break-word; overflow-wrap:anywhere;
 }
 .station-tag{margin:6px 0 0;color:var(--muted)}
 .status{display:flex;align-items:center;gap:9px;font:500 13px var(--f-mono);font-variant-numeric:tabular-nums}
@@ -158,9 +159,9 @@ button,input{font:inherit;color:inherit}
 .status[data-s="connecting"] .led,.status[data-s="buffering"] .led,.status[data-s="waiting"] .led{background:var(--accent);animation:blink .8s steps(2) infinite}
 .status[data-s="failed"] .led{background:var(--bad)}
 .status[data-s="failed"]{color:var(--bad)}
-.meta{margin-top:-8px;font:12px var(--f-mono);color:var(--muted);overflow-wrap:anywhere}
+.meta{margin-top:-8px;font:12px var(--f-mono);color:var(--muted);word-wrap:break-word; overflow-wrap:anywhere}
 
-.transport{display:flex;align-items:center;justify-content:center;gap:22px;padding-block:4px}
+.transport{display:flex;align-items:center;justify-content:center;gap:22px;padding-top:4px;padding-bottom:4px}
 .btn-round{
   width:50px; height:50px; border-radius:50%; border:1px solid var(--line);
   background:transparent; display:grid; place-items:center; cursor:pointer;
@@ -171,7 +172,7 @@ button,input{font:inherit;color:inherit}
 .btn-play:hover{background:var(--accent);color:var(--panel)}
 .btn-play svg{width:30px;height:30px}
 .btn-play[data-s="connecting"]::after,.btn-play[data-s="buffering"]::after,.btn-play[data-s="waiting"]::after{
-  content:""; position:absolute; inset:-6px; border-radius:50%;
+  content:""; position:absolute; top:-6px; right:-6px; bottom:-6px; left:-6px; inset:-6px; border-radius:50%;
   border:2px solid transparent; border-top-color:var(--accent); border-right-color:var(--accent);
   animation:spin 1s linear infinite;
 }
@@ -183,7 +184,7 @@ button,input{font:inherit;color:inherit}
 .vol-val{font:12px var(--f-mono);color:var(--muted);width:4ch;text-align:right;font-variant-numeric:tabular-nums}
 
 /* Sekcje */
-.section{display:grid;gap:10px}
+.section{display:grid;grid-gap:10px; gap:10px}
 .section-head{display:flex;align-items:baseline;justify-content:space-between;gap:12px;flex-wrap:wrap}
 h2{margin:0;font:500 12px var(--f-mono);text-transform:uppercase;letter-spacing:.14em;color:var(--muted)}
 .hint{font:12px var(--f-mono);color:var(--muted)}
@@ -192,7 +193,7 @@ h2{margin:0;font:500 12px var(--f-mono);text-transform:uppercase;letter-spacing:
 .item{display:flex;align-items:stretch;border-top:1px solid var(--line)}
 .item:first-child{border-top:0}
 .row{
-  flex:1; min-width:0; display:grid; grid-template-columns:14px 1fr auto; gap:12px; align-items:center;
+  flex:1; min-width:0; display:grid; grid-template-columns:14px 1fr auto; grid-gap:12px; gap:12px; align-items:center;
   padding:12px 14px; background:transparent; border:0; text-align:left; cursor:pointer;
 }
 .row:hover{background:color-mix(in srgb,var(--accent) 7%,transparent)}
@@ -218,7 +219,7 @@ h2{margin:0;font:500 12px var(--f-mono);text-transform:uppercase;letter-spacing:
   background:var(--panel); outline-offset:0;
 }
 .search::placeholder{color:var(--muted)}
-.empty{padding:16px 14px;color:var(--muted);display:grid;gap:10px;justify-items:start}
+.empty{padding:16px 14px;color:var(--muted);display:grid;grid-gap:10px; gap:10px;justify-items:start}
 .btn-text{
   border:1px solid var(--line); background:transparent; border-radius:999px;
   padding:7px 14px; cursor:pointer; font-weight:500;
@@ -226,8 +227,8 @@ h2{margin:0;font:500 12px var(--f-mono);text-transform:uppercase;letter-spacing:
 .btn-text:hover{border-color:var(--accent);color:var(--accent)}
 
 /* Ustawienia */
-.settings{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:16px;display:grid;gap:16px}
-.setting{display:grid;gap:8px}
+.settings{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:16px;display:grid;grid-gap:16px; gap:16px}
+.setting{display:grid;grid-gap:8px; gap:8px}
 .setting-label{font-weight:600}
 .chips{display:flex;flex-wrap:wrap;gap:8px}
 .chip{
@@ -240,15 +241,15 @@ h2{margin:0;font:500 12px var(--f-mono);text-transform:uppercase;letter-spacing:
 .diag summary{cursor:pointer}
 .diag-out{
   margin:0; padding:10px 12px; border-radius:10px; border:1px solid var(--line); background:var(--bg);
-  font:12px/1.55 var(--f-mono); color:var(--muted); white-space:pre-wrap; overflow-wrap:anywhere;
+  font:12px/1.55 var(--f-mono); color:var(--muted); white-space:pre-wrap; word-wrap:break-word; overflow-wrap:anywhere;
 }
 
-footer{font:12px/1.6 var(--f-mono);color:var(--muted);display:grid;gap:4px}
-.player,.side{display:grid;gap:22px;min-width:0}
+footer{font:12px/1.6 var(--f-mono);color:var(--muted);display:grid;grid-gap:4px; gap:4px}
+.player,.side{display:grid;grid-gap:22px; gap:22px;min-width:0}
 
 /* Ekran poziomy (radio w desce, tablet): odtwarzacz po lewej, listy po prawej */
 @media (min-width:880px) and (orientation:landscape){
-  .app{max-width:1180px;grid-template-columns:minmax(0,1fr) minmax(0,1fr);column-gap:28px;align-items:start}
+  .app{max-width:1180px;grid-template-columns:minmax(0,1fr) minmax(0,1fr);grid-column-gap:28px; column-gap:28px;align-items:start}
   .top,footer{grid-column:1 / -1}
   .player{position:sticky;top:16px}
   .list.scroll{max-height:none}
@@ -261,6 +262,16 @@ kbd{font:inherit;border:1px solid var(--line);border-bottom-width:2px;border-rad
 @media (prefers-reduced-motion:reduce){
   *,*::before,*::after{animation:none!important;transition:none!important}
 }
+
+/* Stare przeglądarki (np. Chrome 63 w radiach samochodowych) nie znają "gap" w wierszach flex */
+@supports not (gap: 1px){
+  .top-right > * + *, .vol > * + *, .section-head > * + *, .dial-foot > * + * {margin-left:12px}
+  .status > * + * {margin-left:9px}
+  .transport > * + * {margin-left:22px}
+  .chips {margin:-4px}
+  .chips > * {margin:4px}
+}
+
 </style>
 </head>
 <body>
@@ -293,7 +304,7 @@ kbd{font:inherit;border:1px solid var(--line);border-bottom-width:2px;border-rad
       <p class="station-tag" id="stTag">Muzyka i Fakty</p>
     </div>
     <div class="track" id="track" hidden>
-      <img class="cover" id="cover" alt="" width="64" height="64" referrerpolicy="no-referrer">
+      <img class="cover" id="cover" alt="" width="64" height="64" referrerpolicy="no-referrer" hidden>
       <div class="track-text">
         <span class="track-label">Teraz gra</span>
         <span class="track-title" id="trTitle"></span>
@@ -710,37 +721,67 @@ function parsePlaylist(rows){
 function showTrack(info){
   lastTrack = (info && info.t) ? info : null;
   var box = $('track');
-  if (!lastTrack){ box.hidden = true; setMediaMeta(); return; }
+  if (!lastTrack){ box.hidden = true; setCover(null); setMediaMeta(); return; }
   $('trTitle').textContent = lastTrack.t;
   $('trArtist').textContent = lastTrack.a || '';
   $('trArtist').hidden = !lastTrack.a;
   var nx = lastTrack.nt ? 'Następnie: ' + (lastTrack.na ? lastTrack.na + ' – ' : '') + lastTrack.nt : '';
   $('trNext').textContent = nx;
   $('trNext').hidden = !nx;
-  // w aplikacji na Androida okładkę pobiera sama aplikacja i przekazuje gotowy obrazek (img)
-  var img = $('cover'), want = lastTrack.img || lastTrack.c || '';
-  if (want && img.dataset.want !== want){ img.dataset.want = want; img.dataset.state = 'loading'; img.src = want; }
-  var show = !!want && img.dataset.state !== 'failed';
-  img.hidden = !show;
-  box.classList.toggle('no-cover', !show);
+  setCover(lastTrack);
   box.hidden = false;
   setMediaMeta();
 }
-var coverDiag = 'jeszcze nie było okładki';
+/* Okładka. Każdą próbę wczytujemy w osobnym obiekcie Image z numerem próby,
+   a widoczny obrazek podmieniamy dopiero po udanym wczytaniu. Dzięki temu spóźniony
+   błąd poprzedniej próby (stare przeglądarki w radiach) nie ukryje dobrej okładki. */
+var coverDiag = 'jeszcze nie było okładki', coverLog = [], coverReq = 0, coverSong = '', coverKey = '';
 function srcKind(u){ return /^data:/.test(u) ? 'obrazek z aplikacji' : String(u).replace(/^(https?):\/\/([^\/]+).*$/, '$1 $2'); }
-$('cover').addEventListener('load', function(){
-  this.dataset.state = 'ok';
-  coverDiag = 'wczytana (' + srcKind(this.getAttribute('src') || '') + ')';
-});
-$('cover').addEventListener('error', function(){
-  var cur = this.getAttribute('src') || '';
-  coverDiag = 'błąd (' + srcKind(cur) + ')';
-  // w aplikacji spróbuj jeszcze zwykłym http: starsze radia nie ufają nowszym certyfikatom
-  if (location.protocol !== 'https:' && /^https:\/\//.test(cur)){ this.src = 'http://' + cur.slice(8); return; }
-  this.dataset.state = 'failed';
-  this.hidden = true;
-  $('track').classList.add('no-cover');
-});
+function showCoverEl(on){ $('cover').hidden = !on; $('track').classList.toggle('no-cover', !on); }
+function setCover(info){
+  var song = info ? (info.c || '') + '|' + (info.t || '') : '';
+  if (song !== coverSong){
+    // inny utwór: stara okładka znika od razu
+    coverSong = song; coverKey = ''; coverLog = []; coverReq++;
+    showCoverEl(false);
+  }
+  if (!info) return;
+  // w aplikacji na Androida okładkę pobiera sama aplikacja i przekazuje gotowy obrazek (img)
+  var cands = [];
+  if (info.img) cands.push(info.img);
+  else if (info.c){
+    cands.push(info.c);
+    // w aplikacji spróbuj jeszcze zwykłym http
+    if (location.protocol !== 'https:' && /^https:\/\//.test(info.c)) cands.push('http://' + info.c.slice(8));
+  }
+  var key = cands.join('|');
+  if (!cands.length || key === coverKey) return;
+  coverKey = key;
+  var id = ++coverReq, i = 0;
+  function note(t){
+    coverLog.push(t);
+    if (coverLog.length > 5) coverLog.shift();
+    coverDiag = coverLog.join(' → ');
+  }
+  (function next(){
+    if (id !== coverReq) return;
+    if (i >= cands.length) return;
+    var u = cands[i++], probe = new Image();
+    try{ probe.referrerPolicy = 'no-referrer'; }catch(e){}
+    probe.onload = function(){
+      if (id !== coverReq) return;
+      note(srcKind(u) + ': OK');
+      $('cover').src = u;
+      showCoverEl(true);
+    };
+    probe.onerror = function(){
+      if (id !== coverReq) return;
+      note(srcKind(u) + ': błąd');
+      next();
+    };
+    probe.src = u;
+  })();
+}
 
 function stopMeta(){ clearTimeout(metaTimer); metaTimer = null; }
 function pollMetaSoon(){ if (!metaTimer && !metaBusy) pollMeta(); }

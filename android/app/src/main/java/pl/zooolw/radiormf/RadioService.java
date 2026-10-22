@@ -817,9 +817,16 @@ public class RadioService extends Service {
                 if (f != null) {
                     bmp = BitmapFactory.decodeByteArray(f.body, 0, f.body.length);
                     if (bmp != null) {
-                        String type = f.type != null && f.type.startsWith("image/") ? f.type.split(";")[0].trim() : "image/jpeg";
-                        data = "data:" + type + ";base64," + Base64.encodeToString(f.body, Base64.NO_WRAP);
-                        log.append(", ").append(bmp.getWidth()).append("×").append(bmp.getHeight()).append(" px");
+                        // zapisz na nowo w zwykłym formacie: stare przeglądarki w radiach nie czytają
+                        // niektórych plików JPEG (np. w kolorach do druku), które Android otwiera bez problemu
+                        boolean png = bmp.hasAlpha();
+                        ByteArrayOutputStream enc = new ByteArrayOutputStream();
+                        if (bmp.compress(png ? Bitmap.CompressFormat.PNG : Bitmap.CompressFormat.JPEG, 88, enc)) {
+                            data = "data:image/" + (png ? "png" : "jpeg") + ";base64," + Base64.encodeToString(enc.toByteArray(), Base64.NO_WRAP);
+                        }
+                        log.append(", ").append(bmp.getWidth()).append("×").append(bmp.getHeight()).append(" px")
+                                .append(", źródło ").append(f.type).append(" ").append(f.body.length / 1024).append(" kB")
+                                .append(data.isEmpty() ? ", nie udało się przekodować" : ", przekodowana");
                     } else {
                         log.append(", nie da się odczytać obrazka (").append(f.type).append(", ").append(f.body.length).append(" B)");
                     }
