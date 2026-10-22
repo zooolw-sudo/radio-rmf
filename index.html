@@ -81,11 +81,11 @@ button:focus,summary:focus,input[type=range]:focus{outline:none}
 .sub{font:12px var(--f-mono);color:var(--muted);letter-spacing:.04em}
 .top-right{display:flex;align-items:center;gap:12px}
 .btn-theme{
+  position:relative; flex:none; padding:0;
   width:40px; height:40px; border-radius:50%; border:1px solid var(--line);
-  background:transparent; display:grid; place-items:center; cursor:pointer; align-self:center;
+  background:transparent; cursor:pointer; align-self:center;
 }
 .btn-theme svg{width:20px;height:20px;fill:currentColor}
-.btn-theme:hover{border-color:var(--accent);color:var(--accent)}
 
 /* Teraz gra */
 .track{
@@ -128,7 +128,6 @@ button:focus,summary:focus,input[type=range]:focus{outline:none}
   font:600 14px/1 var(--f-display); letter-spacing:.08em; text-transform:uppercase;
   color:var(--glass-dim); white-space:nowrap; transition:color .3s;
 }
-.mark:hover{color:var(--glass-ink)}
 .mark.on{color:var(--glass-ink);text-shadow:0 0 14px rgba(244,195,106,.55);text-shadow:0 0 14px color-mix(in srgb,var(--glass-ink) 55%,transparent)}
 .mark.temp{font-style:italic}
 .needle{
@@ -165,13 +164,12 @@ button:focus,summary:focus,input[type=range]:focus{outline:none}
 
 .transport{display:flex;align-items:center;justify-content:center;gap:22px;padding-top:4px;padding-bottom:4px}
 .btn-round{
+  position:relative; flex:none; padding:0;
   width:50px; height:50px; border-radius:50%; border:1px solid var(--line);
-  background:transparent; display:grid; place-items:center; cursor:pointer;
+  background:transparent; cursor:pointer;
 }
-.btn-round:hover{border-color:var(--muted)}
 .btn-round svg{width:22px;height:22px;fill:currentColor}
 .btn-play{position:relative;width:80px;height:80px;border:0;background:var(--play-bg);color:var(--play-fg)}
-.btn-play:hover{background:var(--accent);color:var(--panel)}
 .btn-play svg{width:30px;height:30px}
 .btn-play[data-s="connecting"]::after,.btn-play[data-s="buffering"]::after,.btn-play[data-s="waiting"]::after{
   content:""; position:absolute; top:-6px; right:-6px; bottom:-6px; left:-6px; inset:-6px; border-radius:50%;
@@ -207,10 +205,10 @@ h2{margin:0;font:500 12px var(--f-mono);text-transform:uppercase;letter-spacing:
 .item{display:flex;align-items:stretch;border-top:1px solid var(--line)}
 .item:first-child{border-top:0}
 .row{
-  flex:1; min-width:0; display:grid; grid-template-columns:14px 1fr auto; grid-gap:12px; gap:12px; align-items:center;
+  display:block; flex:1; min-width:0; width:100%;
   padding:12px 14px; background:transparent; border:0; text-align:left; cursor:pointer;
 }
-.row:hover{background:rgba(181,101,11,.07);background:color-mix(in srgb,var(--accent) 7%,transparent)}
+.row-in{display:grid; grid-template-columns:14px minmax(0,1fr) auto; grid-gap:12px; gap:12px; align-items:center}
 .row-ind{width:8px;height:8px;border-radius:2px;background:var(--line);justify-self:center}
 .row-text{min-width:0}
 .row-name{display:block;font-weight:600;font-size:16px;line-height:1.25;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -220,13 +218,14 @@ h2{margin:0;font:500 12px var(--f-mono);text-transform:uppercase;letter-spacing:
 .item.current .row-ind{background:var(--accent)}
 .item.current.live .row-ind{background:var(--ok);animation:pulse 1.8s ease-in-out infinite}
 .star{
-  flex:none; width:48px; border:0; border-left:1px solid var(--line); background:transparent;
-  display:grid; place-items:center; cursor:pointer; color:var(--muted);
+  position:relative; flex:none; width:48px; padding:0; border:0; border-left:1px solid var(--line); background:transparent;
+  cursor:pointer; color:var(--muted);
 }
+/* ikona dokładnie na środku przycisku, w każdej przeglądarce */
+.btn-theme svg,.btn-round svg,.star svg{position:absolute;left:50%;top:50%;-webkit-transform:translate(-50%,-50%);transform:translate(-50%,-50%);display:block}
 .star svg{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linejoin:round}
 .star[aria-pressed="true"]{color:var(--accent)}
 .star[aria-pressed="true"] svg{fill:currentColor}
-.star:hover{color:var(--accent)}
 
 .search{
   width:100%; padding:10px 12px; border-radius:10px; border:1px solid var(--line);
@@ -238,7 +237,6 @@ h2{margin:0;font:500 12px var(--f-mono);text-transform:uppercase;letter-spacing:
   border:1px solid var(--line); background:transparent; border-radius:999px;
   padding:7px 14px; cursor:pointer; font-weight:500;
 }
-.btn-text:hover{border-color:var(--accent);color:var(--accent)}
 
 /* Ustawienia */
 .settings{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:16px;display:grid;grid-gap:16px; gap:16px}
@@ -286,6 +284,16 @@ kbd{font:inherit;border:1px solid var(--line);border-bottom-width:2px;border-rad
   .chips > * {margin:4px}
 }
 
+/* najechanie kursorem — tylko na urządzeniach z myszką (na dotyku podświetlenie zostawało) */
+@media (hover:hover){
+  .btn-theme:hover{border-color:var(--accent);color:var(--accent)}
+  .mark:hover{color:var(--glass-ink)}
+  .btn-round:hover{border-color:var(--muted)}
+  .btn-play:hover{background:var(--accent);color:var(--panel)}
+  .row:hover{background:rgba(181,101,11,.07);background:color-mix(in srgb,var(--accent) 7%,transparent)}
+  .star:hover{color:var(--accent)}
+  .btn-text:hover{border-color:var(--accent);color:var(--accent)}
+}
 </style>
 </head>
 <body>
@@ -946,7 +954,9 @@ function makeItem(st, withStar){
   var tg = document.createElement('span'); tg.className = 'row-tag'; tg.textContent = st.tag || 'Kanał tematyczny';
   text.appendChild(nm); text.appendChild(tg);
   var fm = document.createElement('span'); fm.className = 'row-fmt'; fm.textContent = fmtHint(st);
-  row.appendChild(ind); row.appendChild(text); row.appendChild(fm);
+  var inner = document.createElement('span'); inner.className = 'row-in';
+  inner.appendChild(ind); inner.appendChild(text); inner.appendChild(fm);
+  row.appendChild(inner);
   row.addEventListener('click', function(){
     if (current && current.id === st.id && state !== 'paused' && state !== 'idle' && state !== 'failed') stop();
     else start(st);
