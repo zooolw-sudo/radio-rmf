@@ -707,15 +707,24 @@ function showTrack(info){
   var nx = lastTrack.nt ? 'Następnie: ' + (lastTrack.na ? lastTrack.na + ' – ' : '') + lastTrack.nt : '';
   $('trNext').textContent = nx;
   $('trNext').hidden = !nx;
-  var img = $('cover');
-  if (lastTrack.c){
-    if (img.getAttribute('src') !== lastTrack.c) img.src = lastTrack.c;
-    img.hidden = false; box.classList.remove('no-cover');
-  } else { img.hidden = true; box.classList.add('no-cover'); }
+  // w aplikacji na Androida okładkę pobiera sama aplikacja i przekazuje gotowy obrazek (img)
+  var img = $('cover'), want = lastTrack.img || lastTrack.c || '';
+  if (want && img.dataset.want !== want){ img.dataset.want = want; img.dataset.state = 'loading'; img.src = want; }
+  var show = !!want && img.dataset.state !== 'failed';
+  img.hidden = !show;
+  box.classList.toggle('no-cover', !show);
   box.hidden = false;
   setMediaMeta();
 }
-$('cover').addEventListener('error', function(){ this.hidden = true; $('track').classList.add('no-cover'); });
+$('cover').addEventListener('load', function(){ this.dataset.state = 'ok'; });
+$('cover').addEventListener('error', function(){
+  var cur = this.getAttribute('src') || '';
+  // w aplikacji spróbuj jeszcze zwykłym http: starsze radia nie ufają nowszym certyfikatom
+  if (location.protocol !== 'https:' && /^https:\/\//.test(cur)){ this.src = 'http://' + cur.slice(8); return; }
+  this.dataset.state = 'failed';
+  this.hidden = true;
+  $('track').classList.add('no-cover');
+});
 
 function stopMeta(){ clearTimeout(metaTimer); metaTimer = null; }
 function pollMetaSoon(){ if (!metaTimer && !metaBusy) pollMeta(); }

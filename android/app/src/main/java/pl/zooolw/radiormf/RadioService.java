@@ -31,6 +31,7 @@ import android.os.Looper;
 import android.os.PowerManager;
 import android.os.SystemClock;
 import android.text.Html;
+import android.util.Base64;
 
 import org.json.JSONArray;
 import org.json.JSONException;
@@ -41,12 +42,22 @@ import java.io.InputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
+import java.security.KeyStore;
+import java.security.cert.Certificate;
+import java.security.cert.CertificateFactory;
 import java.util.ArrayList;
+import java.util.Enumeration;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+
+import javax.net.ssl.HttpsURLConnection;
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.SSLException;
+import javax.net.ssl.SSLSocketFactory;
+import javax.net.ssl.TrustManagerFactory;
 
 /**
  * Odtwarzanie w tle: strumień radia, powiadomienie z przyciskami,
@@ -120,6 +131,9 @@ public class RadioService extends Service {
     private int metaGen = 0;
     private String songA = "", songT = "", songC = "", nextA = "", nextT = "";
     private String coverLoaded = "";
+    private String coverData = "";          // okładka jako data: URI dla ekranu aplikacji
+    private SSLSocketFactory extraTls;      // tylko wątek "net"
+    private boolean extraTlsTried = false;
     private Bitmap cover;
 
     private final Runnable metaPoll = this::pollMeta;
@@ -285,6 +299,7 @@ public class RadioService extends Service {
                 JSONObject n = new JSONObject();
                 n.put("a", songA); n.put("t", songT); n.put("c", songC);
                 n.put("na", nextA); n.put("nt", nextT);
+                if (!coverData.isEmpty()) n.put("img", coverData);
                 o.put("now", n);
             }
             Station st = current();
@@ -711,6 +726,7 @@ public class RadioService extends Service {
     private void clearSong() {
         songA = songT = songC = nextA = nextT = "";
         cover = null;
+        coverData = "";
         coverLoaded = "";
     }
 
@@ -761,8 +777,14 @@ public class RadioService extends Service {
             String nt = next != null ? clean(next.optString("title")) : "";
             boolean changed = !t.equals(songT) || !a.equals(songA) || !nt.equals(nextT);
             songT = t; songA = a; songC = c; nextA = na; nextT = nt;
-            if (!c.isEmpty() && !c.equals(coverLoaded)) loadCover(c);
-            if (c.isEmpty()) { cover = null; coverLoaded = ""; }
+            if (!c.equals(coverLoaded)) {
+                // nowy utwór: stara okładka znika od razu, nowa dochodzi, gdy się pobierze
+                cover = null;
+                coverData = "";
+                coverLoaded = c;
+                if (!c.isEmpty()) loadCover(c);
+                changed = true;
+            }
             if (changed) publish("meta");
             int up = next != null ? next.optInt("uptime", 0) : 0;
             if (up > 0) return Math.max(8000, Math.min(180000, (up + 6) * 1000L));
@@ -771,52 +793,124 @@ public class RadioService extends Service {
     }
 
     private void loadCover(String url) {
-        coverLoaded = url;
         final int gen = metaGen;
         try {
             net.execute(() -> {
+                Fetched f = fetch(url, 512 * 1024);
                 Bitmap bmp = null;
-                HttpURLConnection c = null;
-                try {
-                    c = (HttpURLConnection) new URL(url).openConnection();
-                    c.setConnectTimeout(8000);
-                    c.setReadTimeout(8000);
-                    c.setRequestProperty("User-Agent", "RadioRMF-Android/1.0");
-                    try (InputStream in = c.getInputStream()) { bmp = BitmapFactory.decodeStream(in); }
-                } catch (Exception ignored) {
-                } finally {
-                    if (c != null) c.disconnect();
+                String data = "";
+                if (f != null) {
+                    bmp = BitmapFactory.decodeByteArray(f.body, 0, f.body.length);
+                    if (bmp != null) {
+                        String type = f.type != null && f.type.startsWith("image/") ? f.type.split(";")[0].trim() : "image/jpeg";
+                        data = "data:" + type + ";base64," + Base64.encodeToString(f.body, Base64.NO_WRAP);
+                    }
                 }
-                final Bitmap result = bmp;
+                final Bitmap rb = bmp;
+                final String rd = data;
                 main.post(() -> {
                     if (gen != metaGen || !url.equals(coverLoaded)) return;
-                    cover = result;
-                    publish("meta");
+                    cover = rb;
+                    coverData = rd;
+                    if (rb != null) publish("meta");
                 });
             });
         } catch (Exception ignored) { }
     }
 
-    private static String httpText(String url) {
+    private String httpText(String url) {
+        Fetched f = fetch(url, 1024 * 1024);
+        return f != null ? new String(f.body, StandardCharsets.UTF_8) : null;
+    }
+
+    private static final class Fetched {
+        byte[] body;
+        String type;
+    }
+
+    /**
+     * Pobiera plik z internetu. Starsze radia z Androidem nie znają nowszych certyfikatów
+     * (np. Let's Encrypt), więc przy błędzie certyfikatu ponawiamy z dołączonymi certyfikatami
+     * głównymi, a na końcu próbujemy zwykłym http.
+     */
+    private Fetched fetch(String url, int maxBytes) {
+        Fetched f = fetchOnce(url, maxBytes, false, 0);
+        if (f == null && url.startsWith("https://")) f = fetchOnce("http://" + url.substring(8), maxBytes, false, 0);
+        return f;
+    }
+
+    private Fetched fetchOnce(String url, int maxBytes, boolean extraTrust, int hops) {
         HttpURLConnection c = null;
         try {
             c = (HttpURLConnection) new URL(url).openConnection();
+            if (extraTrust && c instanceof HttpsURLConnection) {
+                SSLSocketFactory tls = extraTlsFactory();
+                if (tls == null) return null;
+                ((HttpsURLConnection) c).setSSLSocketFactory(tls);
+            }
             c.setConnectTimeout(8000);
             c.setReadTimeout(8000);
+            c.setInstanceFollowRedirects(true);
             c.setRequestProperty("User-Agent", "RadioRMF-Android/1.0");
-            if (c.getResponseCode() != 200) return null;
+            int code = c.getResponseCode();
+            if (code >= 300 && code < 400 && hops < 3) {
+                // przekierowanie między http a https Android sam nie wykonuje
+                String loc = c.getHeaderField("Location");
+                if (loc == null) return null;
+                return fetchOnce(new URL(new URL(url), loc).toString(), maxBytes, extraTrust, hops + 1);
+            }
+            if (code != 200) return null;
             try (InputStream in = c.getInputStream()) {
                 ByteArrayOutputStream out = new ByteArrayOutputStream();
                 byte[] buf = new byte[8192];
                 int n;
-                while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
-                return new String(out.toByteArray(), StandardCharsets.UTF_8);
+                while ((n = in.read(buf)) > 0) {
+                    out.write(buf, 0, n);
+                    if (out.size() > maxBytes) return null;
+                }
+                Fetched r = new Fetched();
+                r.body = out.toByteArray();
+                r.type = c.getContentType();
+                return r;
             }
+        } catch (SSLException e) {
+            return extraTrust ? null : fetchOnce(url, maxBytes, true, hops);
         } catch (Exception e) {
             return null;
         } finally {
             if (c != null) c.disconnect();
         }
+    }
+
+    /** Certyfikaty systemu + dołączone nowsze certyfikaty główne (res/raw/extra_roots.pem). */
+    private SSLSocketFactory extraTlsFactory() {
+        if (extraTlsTried) return extraTls;
+        extraTlsTried = true;
+        try {
+            KeyStore ks = KeyStore.getInstance(KeyStore.getDefaultType());
+            ks.load(null, null);
+            int n = 0;
+            try {
+                KeyStore sys = KeyStore.getInstance("AndroidCAStore");
+                sys.load(null, null);
+                for (Enumeration<String> e = sys.aliases(); e.hasMoreElements(); ) {
+                    Certificate cert = sys.getCertificate(e.nextElement());
+                    if (cert != null) ks.setCertificateEntry("sys" + (n++), cert);
+                }
+            } catch (Exception ignored) { }
+            CertificateFactory cf = CertificateFactory.getInstance("X.509");
+            try (InputStream in = getResources().openRawResource(R.raw.extra_roots)) {
+                for (Certificate cert : cf.generateCertificates(in)) ks.setCertificateEntry("extra" + (n++), cert);
+            }
+            TrustManagerFactory tmf = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm());
+            tmf.init(ks);
+            SSLContext sc = SSLContext.getInstance("TLS");
+            sc.init(null, tmf.getTrustManagers(), null);
+            extraTls = sc.getSocketFactory();
+        } catch (Exception e) {
+            extraTls = null;
+        }
+        return extraTls;
     }
 
     @SuppressWarnings("deprecation")
