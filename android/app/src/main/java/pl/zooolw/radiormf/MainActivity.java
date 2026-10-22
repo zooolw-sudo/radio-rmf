@@ -8,6 +8,11 @@ import android.content.res.Configuration;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.view.View;
+import android.view.Window;
+import android.view.WindowInsets;
+import android.view.WindowInsetsController;
+import android.view.WindowManager;
 import android.webkit.JavascriptInterface;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
@@ -21,6 +26,7 @@ public class MainActivity extends Activity {
 
     private WebView web;
     private RadioService.Listener myListener;
+    private volatile boolean fullscreen = true;
 
     @SuppressLint({"SetJavaScriptEnabled", "AddJavascriptInterface"})
     @Override
@@ -28,6 +34,8 @@ public class MainActivity extends Activity {
         super.onCreate(savedInstanceState);
         getWindow().setStatusBarColor(0xFF151C2B);
         getWindow().setNavigationBarColor(0xFF0D121B);
+        fullscreen = getSharedPreferences("ui", MODE_PRIVATE).getBoolean("fullscreen", true);
+        applyFullscreen();
 
         web = new WebView(this);
         web.setBackgroundColor(0xFF0D121B);
@@ -71,6 +79,51 @@ public class MainActivity extends Activity {
                 String json = svc.stateJson();
                 web.evaluateJavascript("window.__radio&&window.__radio(" + json + ")", null);
             }
+        }
+    }
+
+    @Override
+    public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        // system pokazuje paski np. po powrocie z innej aplikacji — chowamy je ponownie
+        if (hasFocus) applyFullscreen();
+    }
+
+    /** Pełny ekran: bez paska statusu i nawigacji; wysuwają się na chwilę po przeciągnięciu od krawędzi. */
+    @SuppressWarnings("deprecation")
+    private void applyFullscreen() {
+        Window w = getWindow();
+        boolean on = fullscreen;
+        if (on) w.addFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN);
+        else w.clearFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN);
+        if (Build.VERSION.SDK_INT >= 28) {
+            WindowManager.LayoutParams lp = w.getAttributes();
+            lp.layoutInDisplayCutoutMode = on
+                    ? WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+                    : WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_DEFAULT;
+            w.setAttributes(lp);
+        }
+        if (Build.VERSION.SDK_INT >= 30) {
+            w.setDecorFitsSystemWindows(!on);
+            WindowInsetsController c = w.getInsetsController();
+            if (c != null) {
+                if (on) {
+                    c.setSystemBarsBehavior(WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
+                    c.hide(WindowInsets.Type.systemBars());
+                } else {
+                    c.show(WindowInsets.Type.systemBars());
+                }
+            }
+        } else {
+            View d = w.getDecorView();
+            d.setSystemUiVisibility(on
+                    ? View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+                      | View.SYSTEM_UI_FLAG_FULLSCREEN
+                      | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                      | View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                      | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                      | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                    : View.SYSTEM_UI_FLAG_VISIBLE);
         }
     }
 
@@ -131,6 +184,18 @@ public class MainActivity extends Activity {
         @JavascriptInterface
         public boolean isNight() {
             return isNightMode();
+        }
+
+        @JavascriptInterface
+        public boolean isFullscreen() {
+            return fullscreen;
+        }
+
+        @JavascriptInterface
+        public void setFullscreen(boolean on) {
+            fullscreen = on;
+            getSharedPreferences("ui", MODE_PRIVATE).edit().putBoolean("fullscreen", on).apply();
+            runOnUiThread(MainActivity.this::applyFullscreen);
         }
 
         @JavascriptInterface

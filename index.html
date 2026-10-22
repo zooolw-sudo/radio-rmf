@@ -402,6 +402,14 @@ kbd{font:inherit;border:1px solid var(--line);border-bottom-width:2px;border-rad
         </div>
         <span class="setting-note" id="sleepNote">Radio gra, dopóki go nie zatrzymasz.</span>
       </div>
+      <div class="setting" id="fsSetting" hidden>
+        <span class="setting-label">Pełny ekran</span>
+        <div class="chips" id="fs">
+          <button class="chip" type="button" data-fs="1" aria-pressed="true">Włączony</button>
+          <button class="chip" type="button" data-fs="0" aria-pressed="false">Wyłączony</button>
+        </div>
+        <span class="setting-note">Paski systemu wysuniesz na chwilę, przeciągając palcem od krawędzi ekranu.</span>
+      </div>
       <details class="setting diag" id="diagBox" hidden>
         <summary class="setting-label">Diagnostyka</summary>
         <pre class="diag-out" id="diagOut">Włącz stację, a potem otwórz tę sekcję.</pre>
@@ -817,6 +825,25 @@ function pollMeta(){
     metaBusy = false;
     metaFails++;
     if (metaFails < 3) metaTimer = setTimeout(pollMeta, 30000);   // potem cisza do następnej zmiany stacji
+  });
+}
+
+/* ---------- pełny ekran (tylko aplikacja na Androida) ---------- */
+if (NATIVE && typeof NATIVE.setFullscreen === 'function'){
+  var fsOn = true;
+  try{ fsOn = !!NATIVE.isFullscreen(); }catch(e){}
+  var paintFs = function(){
+    Array.prototype.slice.call($('fs').querySelectorAll('.chip')).forEach(function(b){
+      b.setAttribute('aria-pressed', (b.dataset.fs === '1') === fsOn ? 'true' : 'false');
+    });
+  };
+  $('fsSetting').hidden = false;
+  paintFs();
+  $('fs').addEventListener('click', function(e){
+    var b = e.target.closest('.chip'); if (!b) return;
+    fsOn = b.dataset.fs === '1';
+    try{ NATIVE.setFullscreen(fsOn); }catch(err){}
+    paintFs();
   });
 }
 
