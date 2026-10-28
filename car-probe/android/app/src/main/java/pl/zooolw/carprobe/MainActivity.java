@@ -1,6 +1,10 @@
 package pl.zooolw.carprobe;
 
 import android.app.Activity;
+import android.content.BroadcastReceiver;
+import android.content.Context;
+import android.content.IntentFilter;
+import android.content.pm.ApplicationInfo;
 import android.bluetooth.BluetoothAdapter;
 import android.bluetooth.BluetoothDevice;
 import android.content.Intent;
@@ -27,7 +31,13 @@ import java.io.File;
 import java.io.FileOutputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
+import java.io.ByteArrayOutputStream;
 import java.util.ArrayList;
+import java.util.Enumeration;
+import java.util.LinkedHashSet;
+import java.util.Set;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipFile;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
@@ -151,20 +161,16 @@ public class MainActivity extends Activity {
             line(sb, "Klasa android.car.Car: brak");
         }
 
-        section(sb, "2. Właściwości systemu (getprop)");
+        section(sb, "2. Broadcasty z aplikacji samochodowych (skan APK + 90 s nasłuchu)");
+        scanAndListen(sb);
+
+        section(sb, "3. Właściwości systemu (getprop)");
         List<String> props = run("getprop");
         if (props.isEmpty()) line(sb, "(brak wyniku)");
         for (String p : props) {
             if (matches(p)) line(sb, "* " + p);
         }
         line(sb, "(wszystkich właściwości: " + props.size() + ", pokazane tylko pasujące do słów kluczowych)");
-
-        section(sb, "3. Pliki urządzeń: porty, CAN, sieć");
-        listDir(sb, "/dev", new String[]{"tty", "can", "ttyS", "ttyMT", "ttyHS", "ttyUSB", "ttyACM", "serial", "uart", "i2c", "spi", "ttyBT"});
-        listDir(sb, "/sys/class/net", null);
-        listDir(sb, "/sys/class/tty", null);
-        readFile(sb, "/proc/tty/drivers");
-        readFile(sb, "/proc/bus/input/devices");
 
         section(sb, "4. Zainstalowane aplikacje");
         List<PackageInfo> pkgs = getInstalledPackages();
@@ -239,6 +245,106 @@ public class MainActivity extends Activity {
         if (sensors.isEmpty()) line(sb, "Brak czujników");
 
         return sb.toString();
+    }
+
+    /** Skanuje pliki dex aplikacji samochodowych (tylko odczyt) i nasłuchuje pasujących broadcastów. */
+    private void scanAndListen(StringBuilder sb) {
+        String[] pkgs = {"com.kyhero.car.myhost", "com.kyhero.car.myhost2", "com.xygala.pvcanset", "com.zjinnova.zlink", "com.carocean.mcuserver", "com.can.activity"};
+        Set<String> candidates = new LinkedHashSet<>();
+        for (String pkg : pkgs) {
+            try {
+                ApplicationInfo ai = getPackageManager().getApplicationInfo(pkg, 0);
+                List<String> strs = dexStrings(ai.sourceDir);
+                int before = candidates.size();
+                for (String x : strs) {
+                    if (isCandidate(x)) candidates.add(x);
+                }
+                line(sb, pkg + ": tekstów pasujących = " + (candidates.size() - before));
+            } catch (Throwable t) {
+                line(sb, pkg + ": nie udało się odczytać APK (" + t.getClass().getSimpleName() + " " + t.getMessage() + ")");
+            }
+        }
+        List<String> actions = new ArrayList<>();
+        for (String c : candidates) {
+            if (c.contains(".") && !c.contains(" ") && c.length() <= 120 && actions.size() < 80) actions.add(c);
+        }
+        line(sb, "Kandydaci (" + candidates.size() + "), nasłuchuję " + actions.size() + " z nich:");
+        int shown = 0;
+        for (String c : candidates) { if (shown++ < 150) line(sb, "  " + c); }
+        if (candidates.size() > 150) line(sb, "  (pokazano 150 z " + candidates.size() + ")");
+
+        List<String> got = listen(actions, 90);
+        line(sb, "Odebrane broadcasty w 90 s: " + got.size());
+        for (String g : got) line(sb, "  " + g);
+    }
+
+    private boolean isCandidate(String x) {
+        String l = x.toLowerCase();
+        if (x.length() < 6) return false;
+        return l.contains("temp") || l.contains("action") || l.contains("canbus") || l.contains("outside")
+                || l.contains("broadcast") || l.contains("kyhero") || l.contains("can_") || l.contains(".can")
+                || l.contains("cansetup") || l.contains("zlink");
+    }
+
+    private List<String> dexStrings(String apkPath) throws Exception {
+        Set<String> out = new LinkedHashSet<>();
+        try (ZipFile z = new ZipFile(apkPath)) {
+            Enumeration<? extends ZipEntry> en = z.entries();
+            while (en.hasMoreElements()) {
+                ZipEntry e = en.nextElement();
+                if (!e.getName().endsWith(".dex")) continue;
+                ByteArrayOutputStream bo = new ByteArrayOutputStream();
+                try (java.io.InputStream is = z.getInputStream(e)) {
+                    byte[] buf = new byte[65536];
+                    int n;
+                    while ((n = is.read(buf)) > 0) bo.write(buf, 0, n);
+                }
+                byte[] d = bo.toByteArray();
+                StringBuilder cur = new StringBuilder();
+                for (byte b : d) {
+                    if (b >= 0x20 && b < 0x7f) {
+                        cur.append((char) b);
+                    } else {
+                        if (cur.length() >= 6) out.add(cur.toString());
+                        cur.setLength(0);
+                    }
+                }
+            }
+        }
+        return new ArrayList<>(out);
+    }
+
+    private List<String> listen(List<String> actions, int seconds) {
+        final List<String> log = Collections.synchronizedList(new ArrayList<>());
+        if (actions.isEmpty()) return log;
+        BroadcastReceiver rcv = new BroadcastReceiver() {
+            @Override
+            public void onReceive(Context c, android.content.Intent i) {
+                StringBuilder sb = new StringBuilder();
+                sb.append(new java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.US).format(new java.util.Date()));
+                sb.append(' ').append(i.getAction());
+                try {
+                    android.os.Bundle b = i.getExtras();
+                    if (b != null) for (String k : b.keySet()) {
+                        String v;
+                        try { v = String.valueOf(b.get(k)); } catch (Throwable t) { v = "?"; }
+                        if (v.length() > 120) v = v.substring(0, 120) + "…";
+                        sb.append(" | ").append(k).append('=').append(v);
+                    }
+                } catch (Throwable ignored) { }
+                if (log.size() < 300) log.add(sb.toString());
+            }
+        };
+        IntentFilter f = new IntentFilter();
+        for (String a : actions) f.addAction(a);
+        try {
+            registerReceiver(rcv, f);
+            Thread.sleep(seconds * 1000L);
+            unregisterReceiver(rcv);
+        } catch (Throwable t) {
+            log.add("błąd nasłuchu: " + t);
+        }
+        return log;
     }
 
     private void section(StringBuilder sb, String title) {
