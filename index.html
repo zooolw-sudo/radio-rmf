@@ -80,6 +80,12 @@ button:focus,summary:focus,input[type=range]:focus{outline:none}
 .top-left{display:flex;align-items:center;min-width:0;white-space:nowrap}
 .brand{margin:0;font:800 30px/1 var(--f-display);text-transform:uppercase;letter-spacing:.05em}
 .clock{margin-left:12px;font:800 30px/1 var(--f-display);letter-spacing:.05em;color:inherit;white-space:nowrap}
+.clock.car-temp{margin-left:.3em}
+.car-temp[hidden]{display:none}
+@media (max-width:980px){ .top .sub{display:none} }
+@media (max-width:780px){ .brand,.clock{font-size:22px} }
+@media (max-width:620px){ .brand,.clock{font-size:18px;letter-spacing:.02em} }
+@media (max-width:540px){ .brand,.clock{font-size:16px;letter-spacing:0} .clock{margin-left:8px} }
 @media (max-width:440px){ .brand{font-size:14px;letter-spacing:0} .clock{margin-left:6px;font-size:14px;letter-spacing:0} .top-right{gap:6px} }
 .sub{font:12px var(--f-mono);color:var(--muted);letter-spacing:.04em}
 .top-right{display:flex;align-items:center;gap:12px}
@@ -305,6 +311,7 @@ kbd{font:inherit;border:1px solid var(--line);border-bottom-width:2px;border-rad
     <div class="top-left">
       <h1 class="brand">Radio RMF</h1>
       <span class="clock" id="clock" aria-live="off"></span>
+      <span class="clock car-temp" id="carTemp" title="Temperatura zewnętrzna z auta" hidden></span>
     </div>
     <div class="top-right">
       <span class="sub">odbiornik internetowy</span>
@@ -724,6 +731,59 @@ function setState(s){
 }
 setInterval(function(){ if (state === 'playing') $('statusText').textContent = statusText(); }, 1000);
 
+// temperatura zewnętrzna z CAN (tylko w aplikacji na radiu; radio rozsyła ją razem ze stanem klimatyzacji)
+var carTemp = null;              // {v: liczba, f: true gdy °F, at: czas odczytu}
+var CAR_TEMP_MAX_AGE = 2 * 3600e3;   // starszy odczyt (np. z wczoraj) nie jest pokazywany
+function paintCarTemp(){
+  var el = document.getElementById('carTemp');
+  if (!el) return;
+  if (!carTemp || Date.now() - carTemp.at > CAR_TEMP_MAX_AGE){
+    if (el.hidden) return false;
+    el.hidden = true; return true;
+  }
+  var v = Math.round(carTemp.v * 10) / 10;
+  var s = (v % 1 === 0 ? String(v) : v.toFixed(1).replace('.', ',')).replace('-', '−');
+  var txt = '· ' + s + (carTemp.f ? '°F' : '°C');
+  if (el.textContent === txt && !el.hidden) return false;
+  el.textContent = txt;
+  el.hidden = false;
+  return true;
+}
+window.__carTemp = function(o){
+  if (!o || !o.raw) return;
+  var m = String(o.raw).match(/-?\d+(?:[.,]\d+)?/);
+  if (!m) return;
+  var v = parseFloat(m[0].replace(',', '.'));
+  if (!isFinite(v)) return;
+  // czas z aplikacji przeliczamy na zegar strony (gdyby się różniły)
+  var at = o.at && o.now ? Date.now() - (o.now - o.at) : Date.now();
+  carTemp = {v: v, f: /F/i.test(String(o.raw)), at: at};
+  if (paintCarTemp()) fitHeader();
+};
+
+// nagłówek w jednej linii: nazwa, zegar i temperatura mają zawsze tę samą wielkość;
+// gdy się nie mieszczą, wszystkie zmniejszamy razem
+function fitHeader(){
+  var tl = document.querySelector('.top-left');
+  if (!tl) return;
+  var els = tl.querySelectorAll('.brand,.clock');
+  if (!els.length) return;
+  for (var i = 0; i < els.length; i++) els[i].style.fontSize = '';
+  var app = document.querySelector('.app'), tr = document.querySelector('.top-right');
+  if (!app) return;
+  var cs = getComputedStyle(app);
+  var avail = app.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight) - (tr ? tr.offsetWidth + 12 : 0);
+  var size = parseFloat(getComputedStyle(els[0]).fontSize) || 30;
+  var guard = 0;
+  while (tl.scrollWidth > avail && size > 11 && guard++ < 40){
+    size -= 1;
+    for (var j = 0; j < els.length; j++) els[j].style.fontSize = size + 'px';
+  }
+}
+window.__fitHeader = fitHeader;
+window.addEventListener('resize', fitHeader);
+if (document.fonts && document.fonts.ready) document.fonts.ready.then(fitHeader);
+
 // zegar w nagłówku: godzina · dzień tygodnia · data
 (function(){
   var DNI = ['niedziela','poniedziałek','wtorek','środa','czwartek','piątek','sobota'];
@@ -733,7 +793,9 @@ setInterval(function(){ if (state === 'playing') $('statusText').textContent = s
     var txt = pad(d.getHours()) + ':' + pad(d.getMinutes()) + ' · ' + DNI[d.getDay()] + ' '
             + pad(d.getDate()) + '.' + pad(d.getMonth() + 1) + '.' + d.getFullYear();
     var el = document.getElementById('clock');
-    if (el && el.textContent !== txt) el.textContent = txt;
+    var changed = el && el.textContent !== txt;
+    if (changed) el.textContent = txt;
+    if (paintCarTemp() || changed) fitHeader();
   }
   tick();
   setInterval(tick, 10000);
@@ -1301,6 +1363,7 @@ renderChannels();
 showStation();
 setState('idle');
 var nativeBusy = false;   // w aplikacji usługa mogła już grać (np. po ponownym otwarciu ekranu)
+if (NATIVE && typeof NATIVE.carTemp === 'function'){ try{ window.__carTemp(JSON.parse(NATIVE.carTemp() || '{}')); }catch(e){} }
 if (NATIVE){ try{ var s0 = JSON.parse(NATIVE.state() || '{}'); if (s0 && s0.ev){ window.__radio(s0); nativeBusy = ['connecting','buffering','playing','interrupted','waiting'].indexOf(s0.ev) >= 0; } }catch(e){} }
 if (!cached || !cached.list || Date.now() - cached.t > 3 * 864e5) loadChannels();
 

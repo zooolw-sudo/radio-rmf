@@ -2,6 +2,10 @@ package pl.zooolw.radiormf;
 
 import android.annotation.SuppressLint;
 import android.app.Activity;
+import android.content.BroadcastReceiver;
+import android.content.Context;
+import android.content.IntentFilter;
+import android.content.SharedPreferences;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.content.res.Configuration;
@@ -22,6 +26,8 @@ import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
 
+import org.json.JSONObject;
+
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.util.HashMap;
@@ -41,6 +47,17 @@ public class MainActivity extends Activity {
     static final String LOCAL_HOST = "radio-rmf.local";
     private String imgDefaults = "";
     private byte[] testPng;
+
+    /**
+     * Temperatura zewnętrzna z CAN. Aplikacja radia „Informacje o pojeździe” (com.kyhero.car.myhost)
+     * rozsyła stan klimatyzacji broadcastem z tą akcją; pole "out_temp" to tekst typu "12.5℃".
+     * Tylko odbieramy — nic nie wysyłamy do auta.
+     */
+    static final String ACTION_AIRCON = "canbus.aircon.conrol.rx.action";
+    private BroadcastReceiver carTempReceiver;
+    private volatile String carTempRaw = null;
+    private volatile long carTempAt = 0;
+    private volatile int carTempMsgs = 0;
 
     @SuppressLint({"SetJavaScriptEnabled", "AddJavascriptInterface"})
     @Override
@@ -106,6 +123,8 @@ public class MainActivity extends Activity {
         });
         RadioService.listener = myListener;
 
+        startCarTemp();
+
         web.loadUrl("file:///android_asset/index.html");
 
         if (Build.VERSION.SDK_INT >= 33
@@ -125,6 +144,46 @@ public class MainActivity extends Activity {
                 String json = svc.stateJson();
                 web.evaluateJavascript("window.__radio&&window.__radio(" + json + ")", null);
             }
+        }
+    }
+
+    private void startCarTemp() {
+        SharedPreferences sp = getSharedPreferences("car", MODE_PRIVATE);
+        carTempRaw = sp.getString("outTemp", null);
+        carTempAt = sp.getLong("outTempAt", 0);
+        carTempReceiver = new BroadcastReceiver() {
+            @Override
+            public void onReceive(Context c, Intent i) {
+                carTempMsgs++;
+                Object v = null;
+                try { if (i.getExtras() != null) v = i.getExtras().get("out_temp"); } catch (Exception ignored) { }
+                String raw = v == null ? "" : String.valueOf(v).trim();
+                if (raw.isEmpty() || raw.equalsIgnoreCase("null")) return;
+                carTempRaw = raw;
+                carTempAt = System.currentTimeMillis();
+                getSharedPreferences("car", MODE_PRIVATE).edit()
+                        .putString("outTemp", raw).putLong("outTempAt", carTempAt).apply();
+                if (web != null) web.evaluateJavascript("window.__carTemp&&window.__carTemp(" + carTempJson() + ")", null);
+            }
+        };
+        IntentFilter f = new IntentFilter(ACTION_AIRCON);
+        try {
+            if (Build.VERSION.SDK_INT >= 33) registerReceiver(carTempReceiver, f, Context.RECEIVER_EXPORTED);
+            else registerReceiver(carTempReceiver, f);
+        } catch (Exception e) {
+            carTempReceiver = null;
+        }
+    }
+
+    private String carTempJson() {
+        try {
+            JSONObject o = new JSONObject();
+            o.put("raw", carTempRaw == null ? "" : carTempRaw);
+            o.put("at", carTempAt);
+            o.put("now", System.currentTimeMillis());
+            return o.toString();
+        } catch (Exception e) {
+            return "{}";
         }
     }
 
@@ -208,6 +267,10 @@ public class MainActivity extends Activity {
     @Override
     protected void onDestroy() {
         if (RadioService.listener == myListener) RadioService.listener = null;
+        if (carTempReceiver != null) {
+            try { unregisterReceiver(carTempReceiver); } catch (Exception ignored) { }
+            carTempReceiver = null;
+        }
         if (web != null) {
             web.removeJavascriptInterface("AndroidRadio");
             web.destroy();
@@ -265,9 +328,17 @@ public class MainActivity extends Activity {
             String sys = "Aplikacja " + ver
                     + "\nSystem: Android " + Build.VERSION.RELEASE + " (API " + Build.VERSION.SDK_INT + ")"
                     + "\nUrządzenie: " + Build.MANUFACTURER + " " + Build.MODEL
-                    + "\nPrzeglądarka systemu (przed zmianą): " + imgDefaults;
+                    + "\nPrzeglądarka systemu (przed zmianą): " + imgDefaults
+                    + "\nTemperatura z CAN: " + (carTempRaw == null ? "jeszcze nie odebrano"
+                        : carTempRaw + " (" + new java.text.SimpleDateFormat("dd.MM HH:mm:ss", java.util.Locale.US).format(new java.util.Date(carTempAt)) + ")")
+                    + ", komunikatów od startu: " + carTempMsgs;
             RadioService svc = RadioService.instance;
             return sys + "\n" + (svc != null ? svc.diagText() : "Odtwarzacz jeszcze nie uruchomiony — włącz stację.");
+        }
+
+        @JavascriptInterface
+        public String carTemp() {
+            return carTempJson();
         }
 
         @JavascriptInterface
