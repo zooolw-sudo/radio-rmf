@@ -80,7 +80,7 @@ button:focus,summary:focus,input[type=range]:focus{outline:none}
 .top-left{display:flex;align-items:center;min-width:0;white-space:nowrap}
 .brand{margin:0;font:800 30px/1 var(--f-display);text-transform:uppercase;letter-spacing:.05em}
 .clock{margin-left:12px;font:800 30px/1 var(--f-display);letter-spacing:.05em;color:inherit;white-space:nowrap}
-@media (max-width:440px){ .brand{font-size:16px;letter-spacing:.02em} .clock{margin-left:8px;font-size:16px;letter-spacing:.02em} .top-right{gap:8px} }
+@media (max-width:440px){ .brand{font-size:14px;letter-spacing:0} .clock{margin-left:6px;font-size:14px;letter-spacing:0} .top-right{gap:6px} }
 .sub{font:12px var(--f-mono);color:var(--muted);letter-spacing:.04em}
 .top-right{display:flex;align-items:center;gap:12px}
 .btn-theme{
@@ -726,7 +726,7 @@ setInterval(function(){ if (state === 'playing') $('statusText').textContent = s
 
 // zegar w nagłówku: godzina · dzień tygodnia · data
 (function(){
-  var DNI = ['nd','pon','wt','śr','czw','pt','sob'];
+  var DNI = ['niedziela','poniedziałek','wtorek','środa','czwartek','piątek','sobota'];
   function pad(n){ return (n < 10 ? '0' : '') + n; }
   function tick(){
     var d = new Date();
@@ -1300,8 +1300,13 @@ renderStations();
 renderChannels();
 showStation();
 setState('idle');
-if (NATIVE){ try{ var s0 = JSON.parse(NATIVE.state() || '{}'); if (s0 && s0.ev) window.__radio(s0); }catch(e){} }
+var nativeBusy = false;   // w aplikacji usługa mogła już grać (np. po ponownym otwarciu ekranu)
+if (NATIVE){ try{ var s0 = JSON.parse(NATIVE.state() || '{}'); if (s0 && s0.ev){ window.__radio(s0); nativeBusy = ['connecting','buffering','playing','interrupted','waiting'].indexOf(s0.ev) >= 0; } }catch(e){} }
 if (!cached || !cached.list || Date.now() - cached.t > 3 * 864e5) loadChannels();
+
+// autoodtwarzanie: po włączeniu aplikacji od razu gra ostatnio wybrana stacja
+// (w przeglądarce telefonu może to zablokować, wtedy zostaje przycisk Play)
+if (!nativeBusy) setTimeout(function(){ if (!wantPlaying) start(current); }, 300);
 
 // tryb aplikacji: kopia offline i instalacja na ekranie głównym (działa tylko z adresu https)
 if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost')){
