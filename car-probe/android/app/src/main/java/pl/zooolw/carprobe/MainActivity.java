@@ -1,63 +1,58 @@
 package pl.zooolw.carprobe;
 
 import android.app.Activity;
-import android.content.BroadcastReceiver;
+import android.content.ComponentName;
 import android.content.Context;
-import android.content.IntentFilter;
-import android.content.pm.ApplicationInfo;
-import android.bluetooth.BluetoothAdapter;
-import android.bluetooth.BluetoothDevice;
 import android.content.Intent;
-import android.content.pm.PackageInfo;
+import android.content.ServiceConnection;
+import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
-import android.content.pm.ProviderInfo;
 import android.database.Cursor;
-import android.hardware.Sensor;
-import android.hardware.SensorManager;
-import android.hardware.usb.UsbDevice;
-import android.hardware.usb.UsbManager;
-import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Environment;
+import android.os.IBinder;
 import android.provider.Settings;
-import android.view.View;
 import android.widget.Button;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
 
-import java.io.BufferedReader;
-import java.io.File;
-import java.io.FileOutputStream;
-import java.io.InputStreamReader;
-import java.io.OutputStream;
 import java.io.ByteArrayOutputStream;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
+import java.io.InputStream;
+import java.io.OutputStream;
 import java.util.ArrayList;
 import java.util.Enumeration;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
-import java.util.Collections;
-import java.util.Comparator;
-import java.util.List;
-import java.util.Map;
-import java.util.TreeMap;
+import java.util.zip.ZipOutputStream;
 
 /**
- * Sprawdza, co system tego radia udostępnia aplikacjom: właściwości systemu,
- * zainstalowane aplikacje (w tym dostawców danych), porty, Bluetooth, USB,
- * czujniki i ustawienia. Nic nie zmienia — tylko czyta i zapisuje raport.
+ * Car Probe: diagnostyka radia samochodowego.
+ * Wersja skupiona na CAN: stan magistrali, interfejsy AIDL aplikacji „Informacje o pojeździe”,
+ * teksty z kodu związane z temperaturą oraz paczka ZIP z plikami APK do analizy.
+ * Niczego nie zmienia w aucie ani w radiu — tylko czyta.
  */
 public class MainActivity extends Activity {
 
-    private static final String[] KEYWORDS = {
-            "temp", "can", "car", "auto", "vehicle", "obd", "gps", "ambient", "outside", "outdoor", "canbus", "bus", "vin", "speed",
-            "carocean", "ckx", "zlink", "mcu", "status", "adapter", "sensor"
+    private static final String HOST = "com.kyhero.car.myhost";
+    private static final String[] APK_PACKAGES = {
+            "com.kyhero.car.myhost", "com.kyhero.car.myhost2", "com.xygala.pvcanset"
     };
+    private static final long MAX_ZIP_BYTES = 120L * 1024 * 1024;
 
     private TextView report;
-    private ScrollView scroll;
     private Button btnRun, btnShare;
     private String lastReport = "";
     private volatile boolean running = false;
@@ -85,7 +80,7 @@ public class MainActivity extends Activity {
 
         root.addView(buttons);
 
-        scroll = new ScrollView(this);
+        ScrollView scroll = new ScrollView(this);
         report = new TextView(this);
         report.setTextIsSelectable(true);
         report.setTextSize(12f);
@@ -95,6 +90,21 @@ public class MainActivity extends Activity {
         root.addView(scroll, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
 
         setContentView(root);
+
+        // dostęp do pamięci: odczyt wtyczki CAN i zapis paczki do folderu Download
+        if (Build.VERSION.SDK_INT >= 23 && Build.VERSION.SDK_INT <= 28
+                && checkSelfPermission("android.permission.WRITE_EXTERNAL_STORAGE") != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(new String[]{
+                    "android.permission.READ_EXTERNAL_STORAGE",
+                    "android.permission.WRITE_EXTERNAL_STORAGE"}, 1);
+        } else {
+            runProbes();
+        }
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
         runProbes();
     }
 
@@ -102,7 +112,7 @@ public class MainActivity extends Activity {
         if (running) return;
         running = true;
         btnRun.setEnabled(false);
-        report.setText("Trwa sprawdzanie…");
+        report.setText("Trwa sprawdzanie… (kopiowanie plików może potrwać do minuty)");
         new Thread(() -> {
             String text;
             try {
@@ -130,160 +140,163 @@ public class MainActivity extends Activity {
         startActivity(Intent.createChooser(i, "Udostępnij raport"));
     }
 
+    /** Zapisuje raport w folderze Download (jeśli wolno) i w folderze aplikacji. */
     private String save(String text) {
-        try {
-            File dir = getExternalFilesDir(null);
-            if (dir == null) dir = getFilesDir();
-            File f = new File(dir, "car-probe.txt");
-            try (OutputStream os = new FileOutputStream(f)) {
-                os.write(text.getBytes("UTF-8"));
-            }
-            return f.getAbsolutePath();
-        } catch (Exception e) {
-            return "nie udało się zapisać (" + e + ")";
+        StringBuilder where = new StringBuilder();
+        for (File dir : outputDirs()) {
+            try {
+                File f = new File(dir, "car-probe.txt");
+                try (OutputStream os = new FileOutputStream(f)) {
+                    os.write(text.getBytes("UTF-8"));
+                }
+                if (where.length() > 0) where.append(" oraz ");
+                where.append(f.getAbsolutePath());
+            } catch (Exception ignored) { }
         }
+        return where.length() > 0 ? where.toString() : "nie udało się zapisać";
+    }
+
+    /** Najpierw publiczny folder Download, potem prywatny folder aplikacji. */
+    private List<File> outputDirs() {
+        List<File> dirs = new ArrayList<>();
+        try {
+            File dl = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS);
+            if (dl != null && (dl.exists() || dl.mkdirs()) && dl.canWrite()) dirs.add(dl);
+        } catch (Throwable ignored) { }
+        File own = getExternalFilesDir(null);
+        if (own == null) own = getFilesDir();
+        dirs.add(own);
+        return dirs;
     }
 
     private String buildReport() {
         StringBuilder sb = new StringBuilder();
 
         section(sb, "1. Urządzenie");
-        line(sb, "Producent: " + Build.MANUFACTURER);
-        line(sb, "Model: " + Build.MODEL);
-        line(sb, "Urządzenie: " + Build.DEVICE + " / płyta: " + Build.BOARD + " / sprzęt: " + Build.HARDWARE);
-        line(sb, "Android: " + Build.VERSION.RELEASE + " (API " + Build.VERSION.SDK_INT + ")");
-        line(sb, "Build: " + Build.DISPLAY);
-        line(sb, "Samochód (funkcja systemu): " + getPackageManager().hasSystemFeature("android.hardware.type.automotive"));
+        line(sb, "Model: " + Build.MODEL + " (" + Build.MANUFACTURER + "), Android " + Build.VERSION.RELEASE + " (API " + Build.VERSION.SDK_INT + ")");
         try {
-            Class.forName("android.car.Car");
-            line(sb, "Klasa android.car.Car: JEST");
-        } catch (Throwable t) {
-            line(sb, "Klasa android.car.Car: brak");
-        }
+            line(sb, "Car Probe: " + getPackageManager().getPackageInfo(getPackageName(), 0).versionName);
+        } catch (Throwable ignored) { }
 
-        section(sb, "2. Broadcasty z aplikacji samochodowych (skan APK + 90 s nasłuchu)");
-        scanAndListen(sb);
+        section(sb, "2. Stan CAN (ustawienia systemu)");
+        canSettings(sb);
 
-        section(sb, "3. Właściwości systemu (getprop)");
-        List<String> props = run("getprop");
-        if (props.isEmpty()) line(sb, "(brak wyniku)");
-        for (String p : props) {
-            if (matches(p)) line(sb, "* " + p);
-        }
-        line(sb, "(wszystkich właściwości: " + props.size() + ", pokazane tylko pasujące do słów kluczowych)");
+        section(sb, "3. Interfejsy AIDL aplikacji „Informacje o pojeździe” (tylko nazwa, bez wywołań)");
+        probeServices(sb);
 
-        section(sb, "4. Zainstalowane aplikacje");
-        List<PackageInfo> pkgs = getInstalledPackages();
-        Collections.sort(pkgs, (a, b) -> a.packageName.compareTo(b.packageName));
-        line(sb, "(zainstalowanych aplikacji: " + pkgs.size() + ", pokazane tylko pasujące)");
-        for (PackageInfo p : pkgs) {
-            if (!matches(p.packageName)) continue;
-            boolean sys = (p.applicationInfo.flags & android.content.pm.ApplicationInfo.FLAG_SYSTEM) != 0;
-            String label = String.valueOf(getPackageManager().getApplicationLabel(p.applicationInfo));
-            line(sb, (sys ? "[SYS] " : "[usr] ") + p.packageName + "  \"" + label + "\"  v" + p.versionName);
-        }
+        section(sb, "4. Teksty z kodu: temperatura i moduły danych CAN");
+        codeStrings(sb);
 
-        section(sb, "5. Dostawcy danych (content providers)");
-        for (PackageInfo p : pkgs) {
-            if (p.providers == null) continue;
-            for (ProviderInfo pi : p.providers) {
-                if (!(matches(p.packageName) || matches(pi.authority))) continue;
-                String auth = pi.authority == null ? "" : pi.authority.split(";")[0];
-                line(sb, "* " + p.packageName + " -> " + pi.authority + (pi.exported ? "  (exported)" : ""));
-                dumpProvider(sb, auth);
-            }
-        }
-
-        section(sb, "6. Usługi i odbiorniki o nazwach związanych z autem");
-        for (PackageInfo p : pkgs) {
-            if (p.services != null) for (android.content.pm.ServiceInfo s : p.services) {
-                if (matches(s.name) || matches(p.packageName)) line(sb, "service " + s.packageName + " / " + s.name + (s.exported ? " (exported)" : ""));
-            }
-            if (p.receivers != null) for (android.content.pm.ActivityInfo r : p.receivers) {
-                if (matches(r.name) || matches(p.packageName)) line(sb, "receiver " + r.packageName + " / " + r.name + (r.exported ? " (exported)" : ""));
-            }
-        }
-
-        section(sb, "7. Ustawienia systemu (content://settings)");
-        dumpSettings(sb, Settings.System.CONTENT_URI, "system");
-        dumpSettings(sb, Settings.Global.CONTENT_URI, "global");
-        dumpSettings(sb, Settings.Secure.CONTENT_URI, "secure");
-
-        section(sb, "8. Bluetooth");
-        try {
-            BluetoothAdapter bt = BluetoothAdapter.getDefaultAdapter();
-            if (bt == null) {
-                line(sb, "Brak adaptera Bluetooth");
-            } else {
-                line(sb, "Włączony: " + bt.isEnabled() + ", nazwa: " + bt.getName());
-                for (BluetoothDevice d : bt.getBondedDevices()) {
-                    line(sb, "sparowane: " + d.getName() + " " + d.getAddress());
-                }
-            }
-        } catch (Throwable t) {
-            line(sb, "Błąd Bluetooth: " + t);
-        }
-
-        section(sb, "9. USB");
-        try {
-            UsbManager um = (UsbManager) getSystemService(USB_SERVICE);
-            Map<String, UsbDevice> devs = um.getDeviceList();
-            if (devs.isEmpty()) line(sb, "Brak podłączonych urządzeń USB");
-            for (UsbDevice d : devs.values()) {
-                line(sb, d.getDeviceName() + "  " + d.getProductName() + "  VID " + d.getVendorId() + " PID " + d.getProductId());
-            }
-        } catch (Throwable t) {
-            line(sb, "Błąd USB: " + t);
-        }
-
-        section(sb, "10. Czujniki (SensorManager)");
-        SensorManager sm = (SensorManager) getSystemService(SENSOR_SERVICE);
-        List<Sensor> sensors = sm.getSensorList(Sensor.TYPE_ALL);
-        for (Sensor s : sensors) {
-            line(sb, "type " + s.getType() + "  " + s.getName() + "  (" + s.getVendor() + ")");
-        }
-        if (sensors.isEmpty()) line(sb, "Brak czujników");
+        section(sb, "5. Paczka plików do analizy");
+        buildZip(sb);
 
         return sb.toString();
     }
 
-    /** Skanuje pliki dex aplikacji samochodowych (tylko odczyt) i nasłuchuje pasujących broadcastów. */
-    private void scanAndListen(StringBuilder sb) {
-        String[] pkgs = {"com.kyhero.car.myhost", "com.kyhero.car.myhost2", "com.xygala.pvcanset", "com.zjinnova.zlink", "com.carocean.mcuserver", "com.can.activity"};
-        Set<String> candidates = new LinkedHashSet<>();
-        for (String pkg : pkgs) {
-            try {
-                ApplicationInfo ai = getPackageManager().getApplicationInfo(pkg, 0);
-                List<String> strs = dexStrings(ai.sourceDir);
-                int before = candidates.size();
-                for (String x : strs) {
-                    if (isCandidate(x)) candidates.add(x);
-                }
-                line(sb, pkg + ": tekstów pasujących = " + (candidates.size() - before));
-            } catch (Throwable t) {
-                line(sb, pkg + ": nie udało się odczytać APK (" + t.getClass().getSimpleName() + " " + t.getMessage() + ")");
-            }
-        }
-        List<String> actions = new ArrayList<>();
-        for (String c : candidates) {
-            if (c.contains(".") && !c.contains(" ") && c.length() <= 120 && actions.size() < 80) actions.add(c);
-        }
-        line(sb, "Kandydaci (" + candidates.size() + "), nasłuchuję " + actions.size() + " z nich:");
-        int shown = 0;
-        for (String c : candidates) { if (shown++ < 150) line(sb, "  " + c); }
-        if (candidates.size() > 150) line(sb, "  (pokazano 150 z " + candidates.size() + ")");
+    // ---------- 2. stan CAN ----------
 
-        List<String> got = listen(actions, 90);
-        line(sb, "Odebrane broadcasty w 90 s: " + got.size());
-        for (String g : got) line(sb, "  " + g);
+    private void canSettings(StringBuilder sb) {
+        try (Cursor c = getContentResolver().query(Settings.System.CONTENT_URI, null, null, null, null)) {
+            if (c == null) { line(sb, "brak dostępu"); return; }
+            int nameCol = c.getColumnIndex("name");
+            int valCol = c.getColumnIndex("value");
+            while (c.moveToNext()) {
+                String key = nameCol >= 0 ? c.getString(nameCol) : "";
+                String val = valCol >= 0 ? c.getString(valCol) : "";
+                String l = key == null ? "" : key.toLowerCase(Locale.US);
+                if (l.contains("canbus") || l.contains("canset") || l.contains("car_config_car_id") || l.contains("carselect") || l.contains("temp")) {
+                    line(sb, key + " = " + val);
+                }
+            }
+        } catch (Throwable t) {
+            line(sb, "błąd: " + t);
+        }
     }
 
-    private boolean isCandidate(String x) {
-        String l = x.toLowerCase();
-        if (x.length() < 6) return false;
-        return l.contains("temp") || l.contains("action") || l.contains("canbus") || l.contains("outside")
-                || l.contains("broadcast") || l.contains("kyhero") || l.contains("can_") || l.contains(".can")
-                || l.contains("cansetup") || l.contains("zlink");
+    // ---------- 3. usługi AIDL ----------
+
+    private void probeServices(StringBuilder sb) {
+        String[] services = {
+                HOST + ".Canset.AidlToOutDataService",
+                HOST + ".Canset.AidlToOutData6115Service",
+                HOST + ".Canset.CanbusService"
+        };
+        for (String cls : services) {
+            final String[] result = {null};
+            final CountDownLatch latch = new CountDownLatch(1);
+            ServiceConnection conn = new ServiceConnection() {
+                @Override
+                public void onServiceConnected(ComponentName name, IBinder binder) {
+                    try {
+                        if (binder == null) {
+                            result[0] = "połączono, ale usługa nie zwróciła interfejsu";
+                        } else {
+                            // getInterfaceDescriptor() tylko pyta o nazwę interfejsu — nie wywołuje żadnej metody usługi
+                            result[0] = "interfejs: " + binder.getInterfaceDescriptor()
+                                    + (binder.pingBinder() ? " (odpowiada)" : " (nie odpowiada)");
+                        }
+                    } catch (Throwable t) {
+                        result[0] = "błąd odczytu nazwy: " + t;
+                    }
+                    latch.countDown();
+                }
+
+                @Override
+                public void onServiceDisconnected(ComponentName name) { }
+            };
+            String shortName = cls.substring(cls.lastIndexOf('.') + 1);
+            try {
+                Intent i = new Intent().setComponent(new ComponentName(HOST, cls));
+                boolean ok = bindService(i, conn, Context.BIND_AUTO_CREATE);
+                if (!ok) {
+                    line(sb, shortName + ": nie udało się połączyć");
+                    continue;
+                }
+                boolean done = latch.await(6, TimeUnit.SECONDS);
+                line(sb, shortName + ": " + (done ? result[0] : "brak odpowiedzi w 6 s"));
+                try { unbindService(conn); } catch (Throwable ignored) { }
+            } catch (Throwable t) {
+                line(sb, shortName + ": błąd " + t.getClass().getSimpleName() + " " + t.getMessage());
+            }
+        }
+    }
+
+    // ---------- 4. teksty z kodu ----------
+
+    private void codeStrings(StringBuilder sb) {
+        for (String pkg : new String[]{"com.kyhero.car.myhost", "com.kyhero.car.myhost2"}) {
+            try {
+                ApplicationInfo ai = getPackageManager().getApplicationInfo(pkg, 0);
+                Set<String> hits = new LinkedHashSet<>();
+                for (String s : dexStrings(ai.sourceDir)) {
+                    String c = clean(s);
+                    if (isInteresting(c)) hits.add(c);
+                }
+                line(sb, pkg + " (" + hits.size() + "):");
+                int n = 0;
+                for (String h : hits) {
+                    if (n++ >= 250) { line(sb, "  (pokazano 250 z " + hits.size() + ")"); break; }
+                    line(sb, "  " + h);
+                }
+            } catch (Throwable t) {
+                line(sb, pkg + ": nie udało się odczytać (" + t.getClass().getSimpleName() + ")");
+            }
+        }
+    }
+
+    /** Usuwa znak długości, który w plikach dex stoi tuż przed tekstem, gdy wypada w zakresie drukowalnym. */
+    private String clean(String s) {
+        if (s.length() >= 2 && s.charAt(0) == (char) (s.length() - 1)) return s.substring(1);
+        return s;
+    }
+
+    private boolean isInteresting(String x) {
+        String l = x.toLowerCase(Locale.US);
+        if (l.contains("template") || l.contains("attempt") || l.contains("temporar") || l.contains("tempfile")
+                || l.contains("appcompat") || l.contains("actionbar")) return false;
+        return l.contains("temp") || l.contains("wendu") || l.contains("outside") || l.contains("outdoor")
+                || l.contains("canbus/data") || l.contains("canbus.data") || l.contains("icanbus")
+                || l.contains("aidltoout") || l.contains("/canbus/plugin");
     }
 
     private List<String> dexStrings(String apkPath) throws Exception {
@@ -294,14 +307,13 @@ public class MainActivity extends Activity {
                 ZipEntry e = en.nextElement();
                 if (!e.getName().endsWith(".dex")) continue;
                 ByteArrayOutputStream bo = new ByteArrayOutputStream();
-                try (java.io.InputStream is = z.getInputStream(e)) {
+                try (InputStream is = z.getInputStream(e)) {
                     byte[] buf = new byte[65536];
                     int n;
                     while ((n = is.read(buf)) > 0) bo.write(buf, 0, n);
                 }
-                byte[] d = bo.toByteArray();
                 StringBuilder cur = new StringBuilder();
-                for (byte b : d) {
+                for (byte b : bo.toByteArray()) {
                     if (b >= 0x20 && b < 0x7f) {
                         cur.append((char) b);
                     } else {
@@ -314,38 +326,121 @@ public class MainActivity extends Activity {
         return new ArrayList<>(out);
     }
 
-    private List<String> listen(List<String> actions, int seconds) {
-        final List<String> log = Collections.synchronizedList(new ArrayList<>());
-        if (actions.isEmpty()) return log;
-        BroadcastReceiver rcv = new BroadcastReceiver() {
-            @Override
-            public void onReceive(Context c, android.content.Intent i) {
-                StringBuilder sb = new StringBuilder();
-                sb.append(new java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.US).format(new java.util.Date()));
-                sb.append(' ').append(i.getAction());
-                try {
-                    android.os.Bundle b = i.getExtras();
-                    if (b != null) for (String k : b.keySet()) {
-                        String v;
-                        try { v = String.valueOf(b.get(k)); } catch (Throwable t) { v = "?"; }
-                        if (v.length() > 120) v = v.substring(0, 120) + "…";
-                        sb.append(" | ").append(k).append('=').append(v);
-                    }
-                } catch (Throwable ignored) { }
-                if (log.size() < 300) log.add(sb.toString());
+    // ---------- 5. paczka ZIP ----------
+
+    private void buildZip(StringBuilder sb) {
+        Map<String, File> files = new LinkedHashMap<>();
+
+        for (String pkg : APK_PACKAGES) {
+            try {
+                ApplicationInfo ai = getPackageManager().getApplicationInfo(pkg, 0);
+                files.put("apk/" + pkg + ".apk", new File(ai.sourceDir));
+                if (Build.VERSION.SDK_INT >= 21 && ai.splitSourceDirs != null) {
+                    int k = 0;
+                    for (String sp : ai.splitSourceDirs) files.put("apk/" + pkg + ".split" + (k++) + ".apk", new File(sp));
+                }
+            } catch (Throwable t) {
+                line(sb, pkg + ": brak (" + t.getClass().getSimpleName() + ")");
             }
-        };
-        IntentFilter f = new IntentFilter();
-        for (String a : actions) f.addAction(a);
-        try {
-            registerReceiver(rcv, f);
-            Thread.sleep(seconds * 1000L);
-            unregisterReceiver(rcv);
-        } catch (Throwable t) {
-            log.add("błąd nasłuchu: " + t);
         }
-        return log;
+
+        // wtyczka CAN dla auta (np. P1_501.apk) — szukamy w pamięci radia i w katalogach systemowych
+        List<File> roots = new ArrayList<>();
+        File ext = Environment.getExternalStorageDirectory();
+        if (ext != null) {
+            roots.add(new File(ext, "CanBus"));
+            roots.add(ext);
+        }
+        for (String p : new String[]{"/sdcard/CanBus", "/mnt/sdcard/CanBus", "/storage/sdcard0/CanBus",
+                "/system/app", "/system/priv-app", "/system/vendor/app", "/vendor/app", "/oem", "/system/etc"}) {
+            roots.add(new File(p));
+        }
+        Set<String> seen = new LinkedHashSet<>();
+        int found = 0;
+        for (File r : roots) {
+            List<File> hits = new ArrayList<>();
+            boolean deep = r.getName().equalsIgnoreCase("CanBus");
+            findFiles(r, deep ? 5 : 3, deep, hits);
+            for (File f : hits) {
+                try {
+                    String key = f.getCanonicalPath();
+                    if (!seen.add(key)) continue;
+                } catch (Throwable ignored) { }
+                files.put("plugin" + f.getAbsolutePath(), f);
+                found++;
+            }
+        }
+        line(sb, "Pliki wtyczek CAN znalezione poza aplikacjami: " + found);
+
+        File zipFile = null;
+        for (File dir : outputDirs()) {
+            File z = new File(dir, "car-apk.zip");
+            try {
+                long total = writeZip(z, files, sb);
+                zipFile = z;
+                line(sb, "ZIP: " + z.getAbsolutePath() + " (" + (total / 1024) + " kB przed spakowaniem, plik " + (z.length() / 1024) + " kB)");
+                break;
+            } catch (Throwable t) {
+                line(sb, "Nie udało się zapisać w " + dir + ": " + t.getMessage());
+            }
+        }
+        if (zipFile == null) line(sb, "Nie udało się utworzyć paczki ZIP.");
     }
+
+    /** Szuka plików związanych z CAN; w folderze CanBus bierze wszystko, gdzie indziej tylko pasujące nazwy. */
+    private void findFiles(File dir, int depth, boolean takeAll, List<File> out) {
+        if (dir == null || depth < 0 || out.size() > 60) return;
+        File[] list;
+        try { list = dir.listFiles(); } catch (Throwable t) { return; }
+        if (list == null) return;
+        for (File f : list) {
+            if (out.size() > 60) return;
+            String n = f.getName().toLowerCase(Locale.US);
+            if (f.isDirectory()) {
+                if (n.equals("android") || n.equals("dcim") || n.equals("music") || n.equals("movies") || n.equals("pictures")) continue;
+                boolean inCan = takeAll || n.contains("canbus") || n.contains("kyhero");
+                findFiles(f, depth - 1, inCan, out);
+            } else if (f.canRead()) {
+                boolean match = n.contains("canbus") || n.contains("kyhero") || n.contains("pvcan") || n.matches("p\\d+_\\d+\\.apk");
+                if ((takeAll && (n.endsWith(".apk") || n.endsWith(".jar") || n.endsWith(".dex") || n.endsWith(".so")
+                        || n.endsWith(".json") || n.endsWith(".xml") || n.endsWith(".txt") || n.endsWith(".ini") || n.endsWith(".cfg")))
+                        || match) {
+                    if (f.length() < 50L * 1024 * 1024) out.add(f);
+                }
+            }
+        }
+    }
+
+    private long writeZip(File zip, Map<String, File> files, StringBuilder sb) throws Exception {
+        long total = 0;
+        try (ZipOutputStream zos = new ZipOutputStream(new FileOutputStream(zip))) {
+            byte[] buf = new byte[65536];
+            for (Map.Entry<String, File> e : files.entrySet()) {
+                File f = e.getValue();
+                if (!f.canRead()) {
+                    line(sb, "  pominięto (brak dostępu): " + f);
+                    continue;
+                }
+                if (total + f.length() > MAX_ZIP_BYTES) {
+                    line(sb, "  pominięto (limit rozmiaru): " + f);
+                    continue;
+                }
+                try (InputStream is = new FileInputStream(f)) {
+                    zos.putNextEntry(new ZipEntry(e.getKey().replaceFirst("^/", "")));
+                    int n;
+                    while ((n = is.read(buf)) > 0) zos.write(buf, 0, n);
+                    zos.closeEntry();
+                    total += f.length();
+                    line(sb, "  + " + e.getKey() + " (" + (f.length() / 1024) + " kB)");
+                } catch (Throwable t) {
+                    line(sb, "  błąd przy " + f + ": " + t.getMessage());
+                }
+            }
+        }
+        return total;
+    }
+
+    // ---------- pomocnicze ----------
 
     private void section(StringBuilder sb, String title) {
         sb.append("\n==== ").append(title).append(" ====\n");
@@ -353,107 +448,5 @@ public class MainActivity extends Activity {
 
     private void line(StringBuilder sb, String s) {
         sb.append(s).append('\n');
-    }
-
-    private boolean matches(String s) {
-        if (s == null) return false;
-        String l = s.toLowerCase();
-        for (String k : KEYWORDS) if (l.contains(k)) return true;
-        return false;
-    }
-
-    private List<String> run(String... cmd) {
-        List<String> out = new ArrayList<>();
-        try {
-            Process p = Runtime.getRuntime().exec(cmd);
-            try (BufferedReader r = new BufferedReader(new InputStreamReader(p.getInputStream()))) {
-                String s;
-                while ((s = r.readLine()) != null) out.add(s);
-            }
-            p.waitFor();
-        } catch (Throwable t) {
-            out.add("błąd: " + t);
-        }
-        return out;
-    }
-
-    private void listDir(StringBuilder sb, String dir, String[] prefixes) {
-        File d = new File(dir);
-        String[] names = d.list();
-        line(sb, dir + ": " + (names == null ? "niedostępne" : ""));
-        if (names == null) return;
-        Collections.sort(java.util.Arrays.asList(names));
-        for (String n : names) {
-            boolean ok = prefixes == null;
-            if (!ok) for (String pre : prefixes) if (n.startsWith(pre)) { ok = true; break; }
-            if (ok) {
-                File f = new File(d, n);
-                line(sb, "  " + n + (f.canRead() ? "  (czytelny)" : "") + (f.canWrite() ? " (zapisywalny)" : ""));
-            }
-        }
-    }
-
-    private void readFile(StringBuilder sb, String path) {
-        line(sb, path + ":");
-        try (BufferedReader r = new BufferedReader(new java.io.FileReader(path))) {
-            String s;
-            int n = 0;
-            while ((s = r.readLine()) != null && n++ < 200) line(sb, "  " + s);
-        } catch (Throwable t) {
-            line(sb, "  niedostępne (" + t.getMessage() + ")");
-        }
-    }
-
-    private List<PackageInfo> getInstalledPackages() {
-        int flags = PackageManager.GET_PROVIDERS | PackageManager.GET_RECEIVERS | PackageManager.GET_SERVICES;
-        try {
-            return getPackageManager().getInstalledPackages(flags);
-        } catch (Throwable t) {
-            return new ArrayList<>();
-        }
-    }
-
-    /** Odpytuje dostawcę danych (tylko odczyt, bez argumentów) i zapisuje kolumny oraz pierwsze wiersze. */
-    private void dumpProvider(StringBuilder sb, String authority) {
-        if (authority == null || authority.isEmpty()) return;
-        Uri uri = Uri.parse("content://" + authority);
-        try (Cursor c = getContentResolver().query(uri, null, null, null, null)) {
-            if (c == null) { line(sb, "    brak odpowiedzi (null)"); return; }
-            line(sb, "    kolumny: " + java.util.Arrays.toString(c.getColumnNames()));
-            int n = 0;
-            while (c.moveToNext() && n < 15) {
-                n++;
-                StringBuilder row = new StringBuilder("    wiersz " + n + ": ");
-                for (int i = 0; i < c.getColumnCount(); i++) {
-                    String v;
-                    try { v = c.getString(i); } catch (Throwable t) { v = "(" + t.getClass().getSimpleName() + ")"; }
-                    if (v != null && v.length() > 200) v = v.substring(0, 200) + "…";
-                    row.append(c.getColumnName(i)).append('=').append(v).append("; ");
-                }
-                line(sb, row.toString());
-            }
-            line(sb, "    (wierszy w odpowiedzi: " + (n == 15 ? "15+" : String.valueOf(n)) + ")");
-        } catch (Throwable t) {
-            line(sb, "    błąd odpytania: " + t.getClass().getSimpleName() + " " + t.getMessage());
-        }
-    }
-
-    private void dumpSettings(StringBuilder sb, Uri uri, String name) {
-        line(sb, "content://settings/" + name + ":");
-        try (Cursor c = getContentResolver().query(uri, null, null, null, null)) {
-            if (c == null) { line(sb, "  brak dostępu (null)"); return; }
-            int nameCol = c.getColumnIndex("name");
-            int valCol = c.getColumnIndex("value");
-            int n = 0;
-            while (c.moveToNext()) {
-                n++;
-                String key = nameCol >= 0 ? c.getString(nameCol) : "?";
-                String val = valCol >= 0 ? c.getString(valCol) : "?";
-                if (matches(key)) line(sb, "* " + key + " = " + val);
-            }
-            line(sb, "  (wierszy: " + n + ", pokazane tylko pasujące)");
-        } catch (Throwable t) {
-            line(sb, "  błąd: " + t);
-        }
     }
 }
