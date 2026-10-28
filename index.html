@@ -77,7 +77,10 @@ button:focus,summary:focus,input[type=range]:focus{outline:none}
 /* Nagłówek */
 .top{display:flex;align-items:center;justify-content:space-between;gap:12px}
 @media (max-width:440px){ .top .sub{display:none} }
+.top-left{display:flex;align-items:center;min-width:0;white-space:nowrap}
 .brand{margin:0;font:800 30px/1 var(--f-display);text-transform:uppercase;letter-spacing:.05em}
+.clock{margin-left:12px;font-family:var(--f-display);font-size:14px;line-height:1;color:var(--muted);letter-spacing:.02em;white-space:nowrap}
+@media (max-width:440px){ .brand{font-size:24px} .clock{margin-left:8px;font-size:12px} .top-right{gap:8px} }
 .sub{font:12px var(--f-mono);color:var(--muted);letter-spacing:.04em}
 .top-right{display:flex;align-items:center;gap:12px}
 .btn-theme{
@@ -299,7 +302,10 @@ kbd{font:inherit;border:1px solid var(--line);border-bottom-width:2px;border-rad
 <body>
 <main class="app">
   <header class="top">
-    <h1 class="brand">Radio RMF</h1>
+    <div class="top-left">
+      <h1 class="brand">Radio RMF</h1>
+      <span class="clock" id="clock" aria-live="off"></span>
+    </div>
     <div class="top-right">
       <span class="sub">odbiornik internetowy</span>
       <button class="btn-theme" id="themeBtn" type="button" aria-label="Przełącz na ciemny motyw" title="Ciemny / jasny motyw">
@@ -717,6 +723,21 @@ function setState(s){
   markLists();
 }
 setInterval(function(){ if (state === 'playing') $('statusText').textContent = statusText(); }, 1000);
+
+// zegar w nagłówku: godzina · dzień tygodnia · data
+(function(){
+  var DNI = ['nd','pon','wt','śr','czw','pt','sob'];
+  function pad(n){ return (n < 10 ? '0' : '') + n; }
+  function tick(){
+    var d = new Date();
+    var txt = pad(d.getHours()) + ':' + pad(d.getMinutes()) + ' · ' + DNI[d.getDay()] + ' '
+            + pad(d.getDate()) + '.' + pad(d.getMonth() + 1) + '.' + d.getFullYear();
+    var el = document.getElementById('clock');
+    if (el && el.textContent !== txt) el.textContent = txt;
+  }
+  tick();
+  setInterval(tick, 10000);
+})();
 
 function showStation(){
   if (!current) return;
