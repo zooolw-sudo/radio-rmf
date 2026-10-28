@@ -1,0 +1,52 @@
+name: Car Probe APK
+
+on:
+  push:
+    branches: [main]
+    paths: ['car-probe/**', '.github/workflows/car-probe.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: car-probe-apk
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.11.1'
+
+      - name: Zbuduj APK
+        working-directory: car-probe/android
+        run: gradle assembleRelease --no-daemon --stacktrace
+
+      - name: Nazwij plik
+        run: cp car-probe/android/app/build/outputs/apk/release/app-release.apk car-probe.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: car-probe-apk
+          path: car-probe.apk
+
+      - name: Wystaw do pobrania (Releases, bez oznaczania jako najnowsze)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete car-probe --yes --cleanup-tag || true
+          gh release create car-probe car-probe.apk \
+            --target "${{ github.sha }}" \
+            --title "Car Probe (diagnostyka) 1.0.${{ github.run_number }}" \
+            --notes "Diagnostyka radia samochodowego. Pobierz: https://github.com/${{ github.repository }}/releases/download/car-probe/car-probe.apk" \
+            --latest=false

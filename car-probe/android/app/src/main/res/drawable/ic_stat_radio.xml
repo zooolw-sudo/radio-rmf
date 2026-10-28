@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <!-- skala odbiornika z igłą -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M3,16h18v1.4H3z M4,10.5h1.3v4.5H4z M7.2,12.5h1v2.5h-1z M9.6,10.5h1.3v4.5H9.6z M16.5,10.5h1.3v4.5h-1.3z M19,12.5h1v2.5h-1z M13.2,5h1.8v15h-1.8z" />
+</vector>
