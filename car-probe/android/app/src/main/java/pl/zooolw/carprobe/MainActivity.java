@@ -42,7 +42,8 @@ import java.util.TreeMap;
 public class MainActivity extends Activity {
 
     private static final String[] KEYWORDS = {
-            "temp", "can", "car", "auto", "vehicle", "obd", "gps", "ambient", "outside", "outdoor", "canbus", "bus", "vin", "speed"
+            "temp", "can", "car", "auto", "vehicle", "obd", "gps", "ambient", "outside", "outdoor", "canbus", "bus", "vin", "speed",
+            "carocean", "ckx", "zlink", "mcu", "status", "adapter", "sensor"
     };
 
     private TextView report;
@@ -156,8 +157,7 @@ public class MainActivity extends Activity {
         for (String p : props) {
             if (matches(p)) line(sb, "* " + p);
         }
-        line(sb, "--- wszystkie (" + props.size() + ") ---");
-        for (String p : props) line(sb, p);
+        line(sb, "(wszystkich właściwości: " + props.size() + ", pokazane tylko pasujące do słów kluczowych)");
 
         section(sb, "3. Pliki urządzeń: porty, CAN, sieć");
         listDir(sb, "/dev", new String[]{"tty", "can", "ttyS", "ttyMT", "ttyHS", "ttyUSB", "ttyACM", "serial", "uart", "i2c", "spi", "ttyBT"});
@@ -169,7 +169,9 @@ public class MainActivity extends Activity {
         section(sb, "4. Zainstalowane aplikacje");
         List<PackageInfo> pkgs = getInstalledPackages();
         Collections.sort(pkgs, (a, b) -> a.packageName.compareTo(b.packageName));
+        line(sb, "(zainstalowanych aplikacji: " + pkgs.size() + ", pokazane tylko pasujące)");
         for (PackageInfo p : pkgs) {
+            if (!matches(p.packageName)) continue;
             boolean sys = (p.applicationInfo.flags & android.content.pm.ApplicationInfo.FLAG_SYSTEM) != 0;
             String label = String.valueOf(getPackageManager().getApplicationLabel(p.applicationInfo));
             line(sb, (sys ? "[SYS] " : "[usr] ") + p.packageName + "  \"" + label + "\"  v" + p.versionName);
@@ -179,9 +181,10 @@ public class MainActivity extends Activity {
         for (PackageInfo p : pkgs) {
             if (p.providers == null) continue;
             for (ProviderInfo pi : p.providers) {
-                String auth = pi.authority;
-                line(sb, (matches(p.packageName) || matches(auth) ? "* " : "  ")
-                        + p.packageName + " -> " + auth + (pi.exported ? "  (exported)" : ""));
+                if (!(matches(p.packageName) || matches(pi.authority))) continue;
+                String auth = pi.authority == null ? "" : pi.authority.split(";")[0];
+                line(sb, "* " + p.packageName + " -> " + pi.authority + (pi.exported ? "  (exported)" : ""));
+                dumpProvider(sb, auth);
             }
         }
 
@@ -304,6 +307,31 @@ public class MainActivity extends Activity {
         }
     }
 
+    /** Odpytuje dostawcę danych (tylko odczyt, bez argumentów) i zapisuje kolumny oraz pierwsze wiersze. */
+    private void dumpProvider(StringBuilder sb, String authority) {
+        if (authority == null || authority.isEmpty()) return;
+        Uri uri = Uri.parse("content://" + authority);
+        try (Cursor c = getContentResolver().query(uri, null, null, null, null)) {
+            if (c == null) { line(sb, "    brak odpowiedzi (null)"); return; }
+            line(sb, "    kolumny: " + java.util.Arrays.toString(c.getColumnNames()));
+            int n = 0;
+            while (c.moveToNext() && n < 15) {
+                n++;
+                StringBuilder row = new StringBuilder("    wiersz " + n + ": ");
+                for (int i = 0; i < c.getColumnCount(); i++) {
+                    String v;
+                    try { v = c.getString(i); } catch (Throwable t) { v = "(" + t.getClass().getSimpleName() + ")"; }
+                    if (v != null && v.length() > 200) v = v.substring(0, 200) + "…";
+                    row.append(c.getColumnName(i)).append('=').append(v).append("; ");
+                }
+                line(sb, row.toString());
+            }
+            line(sb, "    (wierszy w odpowiedzi: " + (n == 15 ? "15+" : String.valueOf(n)) + ")");
+        } catch (Throwable t) {
+            line(sb, "    błąd odpytania: " + t.getClass().getSimpleName() + " " + t.getMessage());
+        }
+    }
+
     private void dumpSettings(StringBuilder sb, Uri uri, String name) {
         line(sb, "content://settings/" + name + ":");
         try (Cursor c = getContentResolver().query(uri, null, null, null, null)) {
@@ -311,12 +339,13 @@ public class MainActivity extends Activity {
             int nameCol = c.getColumnIndex("name");
             int valCol = c.getColumnIndex("value");
             int n = 0;
-            while (c.moveToNext() && n++ < 500) {
+            while (c.moveToNext()) {
+                n++;
                 String key = nameCol >= 0 ? c.getString(nameCol) : "?";
                 String val = valCol >= 0 ? c.getString(valCol) : "?";
-                line(sb, (matches(key) ? "* " : "  ") + key + " = " + val);
+                if (matches(key)) line(sb, "* " + key + " = " + val);
             }
-            line(sb, "  (wierszy: " + n + ")");
+            line(sb, "  (wierszy: " + n + ", pokazane tylko pasujące)");
         } catch (Throwable t) {
             line(sb, "  błąd: " + t);
         }
