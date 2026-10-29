@@ -175,6 +175,64 @@ public class MainActivity extends Activity {
         }
     }
 
+    private String webViewInfo = null;
+
+    /** Który WebView jest używany i które pakiety system w ogóle dopuszcza (tylko odczyt). */
+    private String webViewInfo() {
+        if (webViewInfo != null) return webViewInfo;
+        StringBuilder sb = new StringBuilder();
+        String current = "?";
+        if (Build.VERSION.SDK_INT >= 26) {
+            try {
+                android.content.pm.PackageInfo pi = WebView.getCurrentWebViewPackage();
+                if (pi != null) current = pi.packageName + " " + pi.versionName;
+            } catch (Throwable ignored) { }
+        }
+        sb.append("WebView używany: ").append(current);
+        // lista z konfiguracji systemu (ukryte API, dostępne do Androida 8.1 włącznie)
+        String valid = null, all = null;
+        try {
+            Object svc = Class.forName("android.webkit.WebViewFactory").getMethod("getUpdateService").invoke(null);
+            if (svc != null) {
+                valid = providerNames(svc.getClass().getMethod("getValidWebViewPackages").invoke(svc));
+                all = providerNames(svc.getClass().getMethod("getAllWebViewPackages").invoke(svc));
+            }
+        } catch (Throwable t) {
+            valid = "nie udało się odczytać (" + t.getClass().getSimpleName() + ")";
+        }
+        sb.append("\nWebView dopuszczone przez system: ").append(valid == null ? "?" : valid);
+        if (all != null) sb.append("\nWebView w konfiguracji systemu: ").append(all);
+        for (String pkg : new String[]{"com.android.webview", "com.google.android.webview", "com.android.chrome"}) {
+            String v;
+            try {
+                android.content.pm.PackageInfo pi = getPackageManager().getPackageInfo(pkg, 0);
+                boolean on = pi.applicationInfo == null || pi.applicationInfo.enabled;
+                v = pi.versionName + (on ? "" : " (wyłączony)");
+            } catch (Throwable t) {
+                v = "brak";
+            }
+            sb.append("\n  ").append(pkg).append(": ").append(v);
+        }
+        try {
+            String chosen = android.provider.Settings.Global.getString(getContentResolver(), "webview_provider");
+            sb.append("\nUstawienie webview_provider: ").append(chosen == null ? "(domyślne)" : chosen);
+        } catch (Throwable ignored) { }
+        webViewInfo = sb.toString();
+        return webViewInfo;
+    }
+
+    private static String providerNames(Object arr) {
+        if (!(arr instanceof Object[])) return "brak";
+        StringBuilder sb = new StringBuilder();
+        for (Object o : (Object[]) arr) {
+            String name;
+            try { name = String.valueOf(o.getClass().getField("packageName").get(o)); } catch (Throwable t) { name = String.valueOf(o); }
+            if (sb.length() > 0) sb.append(", ");
+            sb.append(name);
+        }
+        return sb.length() == 0 ? "brak" : sb.toString();
+    }
+
     private String carTempJson() {
         try {
             JSONObject o = new JSONObject();
@@ -331,7 +389,8 @@ public class MainActivity extends Activity {
                     + "\nPrzeglądarka systemu (przed zmianą): " + imgDefaults
                     + "\nTemperatura z CAN: " + (carTempRaw == null ? "jeszcze nie odebrano"
                         : carTempRaw + " (" + new java.text.SimpleDateFormat("dd.MM HH:mm:ss", java.util.Locale.US).format(new java.util.Date(carTempAt)) + ")")
-                    + ", komunikatów od startu: " + carTempMsgs;
+                    + ", komunikatów od startu: " + carTempMsgs
+                    + "\n" + webViewInfo();
             RadioService svc = RadioService.instance;
             return sys + "\n" + (svc != null ? svc.diagText() : "Odtwarzacz jeszcze nie uruchomiony — włącz stację.");
         }
