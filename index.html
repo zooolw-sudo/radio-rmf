@@ -614,7 +614,7 @@ function stop(){
   setState(current ? 'paused' : 'idle');
 }
 function toggle(){
-  if (state === 'playing' || state === 'connecting' || state === 'buffering' || state === 'waiting') stop();
+  if (state === 'playing' || state === 'connecting' || state === 'buffering' || state === 'waiting' || state === 'rebuilding') stop();
   else start();   // także "wstrzymane": wznów od razu
 }
 function reconnect(){
@@ -1441,7 +1441,7 @@ showStation();
 setState('idle');
 var nativeBusy = false;   // w aplikacji usługa mogła już grać (np. po ponownym otwarciu ekranu)
 if (NATIVE && typeof NATIVE.carTemp === 'function'){ try{ window.__carTemp(JSON.parse(NATIVE.carTemp() || '{}')); }catch(e){} }
-if (NATIVE){ try{ var s0 = JSON.parse(NATIVE.state() || '{}'); if (s0 && s0.ev){ window.__radio(s0); nativeBusy = ['connecting','buffering','playing','interrupted','waiting'].indexOf(s0.ev) >= 0; } }catch(e){} }
+if (NATIVE){ try{ var s0 = JSON.parse(NATIVE.state() || '{}'); if (s0 && s0.ev){ window.__radio(s0); nativeBusy = ['connecting','buffering','playing','interrupted','waiting','rebuilding'].indexOf(s0.ev) >= 0; } }catch(e){} }
 if (!cached || !cached.list || Date.now() - cached.t > 3 * 864e5) loadChannels();
 
 // autoodtwarzanie: po włączeniu aplikacji od razu gra ostatnio wybrana stacja
