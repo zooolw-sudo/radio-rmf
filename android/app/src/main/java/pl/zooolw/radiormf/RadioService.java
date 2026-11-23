@@ -52,6 +52,10 @@ import java.util.Date;
 import java.util.Locale;
 import java.util.Enumeration;
 import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Iterator;
+import java.util.LinkedHashMap;
+import java.util.Set;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
@@ -67,6 +71,8 @@ import javax.net.ssl.TrustManagerFactory;
  * Odtwarzanie w tle: strumień radia, powiadomienie z przyciskami,
  * przyciski na kierownicy (MediaSession) i ściszanie przy komunikatach nawigacji.
  * Jeśli serwer nie odpowiada, usługa sama przechodzi do następnego adresu stacji.
+ * Domyślnie gra z zapasem na tunele ({@link BufferedEngine}); zwykły MediaPlayer zostaje
+ * jako zapasowy, gdy stacja nie zagra w ten sposób albo zapas jest wyłączony w ustawieniach.
  */
 public class RadioService extends Service {
 
@@ -112,6 +118,15 @@ public class RadioService extends Service {
     private volatile String state = "stopped";
 
     private MediaPlayer mp;
+    private BufferedEngine engine;                        // odtwarzanie z zapasem na tunele
+    private final Set<String> legacyIds = new HashSet<>(); // stacje, które grają zwykłym odtwarzaczem
+    private String engineNote = "";                       // dlaczego zwykły odtwarzacz
+    // stan zapasu (kopiowany na wątku głównym; czytany też z wątku strony)
+    private volatile long bufRes = 0, bufDelay = 0;
+    private volatile boolean bufUp = false, bufRb = false;
+    private volatile int bufIdx = 0;
+    private volatile String bufUrl = "", engineDiag = "";
+    private String lastBufPush = "";
     private MediaSession session;
     private AudioManager am;
     private AudioFocusRequest focusRequest;
@@ -134,10 +149,18 @@ public class RadioService extends Service {
     private final ExecutorService net = Executors.newSingleThreadExecutor();
     private int metaGen = 0;
     private String songA = "", songT = "", songC = "", nextA = "", nextT = "";
-    private String coverLoaded = "";
+    // utwory w kolejności, w jakiej szły na żywo (przy zapasie tytuł pokazujemy z opóźnieniem)
+    private static final class Song { long at; String a, t, c, na, nt; }
+    private final List<Song> songs = new ArrayList<>();
+    // okładki pobrane wcześniej (adres → obrazek), żeby były gotowe, gdy utwór zagra z opóźnieniem
+    private static final class Cover { Bitmap bmp; byte[] bytes; String data; int seq; }
+    private final LinkedHashMap<String, Cover> coverCache = new LinkedHashMap<>();
+    private final Set<String> coverLoading = new HashSet<>();
+    private String coverShown = "";
+    private int coverCounter = 0;
     private String coverData = "";          // okładka jako data: URI dla ekranu aplikacji
     private volatile byte[] coverBytes;     // ta sama okładka jako plik pod adresem aplikacji
-    private volatile String coverMime = "image/jpeg";
+    private volatile String coverMime = "image/png";
     private volatile int coverSeq = 0;
     private SSLSocketFactory extraTls;      // tylko wątek "net"
     private String ua = "Mozilla/5.0 (Linux; Android " + Build.VERSION.RELEASE + ") RadioRMF/1.0";
@@ -167,8 +190,12 @@ public class RadioService extends Service {
                     pauseStart = SystemClock.elapsedRealtime();
                     sawCall = false;
                     normalPolls = 0;
-                    focusFactor = 0f;
-                    applyVolume();
+                    if (engine != null) {
+                        engine.hold(true);   // z zapasem: nic nie przepada, po przerwie gra dalej
+                    } else {
+                        focusFactor = 0f;
+                        applyVolume();
+                    }
                     main.removeCallbacks(callPoll);
                     main.post(callPoll);
                 }
@@ -182,6 +209,7 @@ public class RadioService extends Service {
                 if (pauseKind == PAUSE_MUTED) {
                     pauseKind = PAUSE_NONE;
                     main.removeCallbacks(callPoll);
+                    if (engine != null) engine.hold(false);
                     applyVolume();
                 } else if (pauseKind == PAUSE_CALL || pauseKind == PAUSE_LOST) {
                     resumeAfterPause();   // rozmowa się skończyła
@@ -321,22 +349,35 @@ public class RadioService extends Service {
                 o.put("now", n);
             }
             Station st = current();
+            boolean eng = engine != null;
             if (st != null) {
+                int ui = eng ? bufIdx : urlIdx;
                 o.put("id", st.id);
-                o.put("cand", urlIdx);
+                o.put("cand", ui);
                 o.put("total", st.urls.size());
-                if (urlIdx < st.urls.size()) o.put("url", st.urls.get(urlIdx));
+                if (ui < st.urls.size()) o.put("url", st.urls.get(ui));
             }
+            putBuf(o, eng);
         } catch (Exception ignored) {
             // wywoływane z wątku strony; przy jednoczesnej zmianie listy zwróć to, co jest
         }
         return o.toString();
     }
 
-    /** Gra albo za chwilę zagra (łączy się, buforuje, czeka na internet). */
+    private void putBuf(JSONObject o, boolean eng) throws JSONException {
+        o.put("buf", eng);
+        if (!eng) return;
+        o.put("res", bufRes / 1000);
+        o.put("delay", bufDelay / 1000);
+        o.put("up", bufUp);
+        o.put("rb", bufRb);
+        o.put("tgt", BufferedEngine.RESERVE_TARGET_MS / 1000);
+    }
+
+    /** Gra albo za chwilę zagra (łączy się, buforuje, zbiera zapas, czeka na internet). */
     private boolean isActive() {
         return "playing".equals(state) || "connecting".equals(state) || "buffering".equals(state)
-                || "waiting".equals(state);
+                || "waiting".equals(state) || "rebuilding".equals(state);
     }
 
     /** Aktywne albo wstrzymane z automatycznym wznowieniem. */
@@ -393,7 +434,8 @@ public class RadioService extends Service {
 
     private void resume() {
         if ("interrupted".equals(state)) { resumeAfterPause(); return; }   // "graj" w trakcie przerwy: od razu
-        if ("waiting".equals(state)) { retryNetwork(); return; }
+        if ("rebuilding".equals(state) && engine != null) { engine.playNow(); return; }
+        if ("waiting".equals(state)) { if (engine == null) retryNetwork(); return; }
         if (isActive()) return;
         if (stations.isEmpty()) restoreFromPrefs();
         if (stations.isEmpty()) return;
@@ -435,6 +477,12 @@ public class RadioService extends Service {
             pauseKind = PAUSE_CALL;
             pauseStart = SystemClock.elapsedRealtime();
             setState("interrupted");
+            if (useEngine(current())) {
+                // z zapasem: pobieraj już teraz, po rozmowie zagra od tego miejsca
+                if (wifiLock != null) wifiLock.acquire();
+                startEngine(current(), true);
+                main.post(metaPoll);
+            }
             main.postDelayed(callPoll, CALL_POLL_MS);
             return;
         }
@@ -456,8 +504,12 @@ public class RadioService extends Service {
     // ---------- przerwy: rozmowa telefoniczna ----------
 
     private void enterPause(int kind) {
-        haltStream();
-        if (wifiLock != null && wifiLock.isHeld()) wifiLock.release();
+        if (engine != null) {
+            engine.hold(true);   // pobieranie trwa: po rozmowie gra od miejsca przerwania (najwyżej 2 min wstecz)
+        } else {
+            haltStream();
+            if (wifiLock != null && wifiLock.isHeld()) wifiLock.release();
+        }
         if (pauseKind == PAUSE_NONE || pauseKind == PAUSE_MUTED) {
             if (pauseKind == PAUSE_NONE) {
                 pauseStart = SystemClock.elapsedRealtime();
@@ -503,6 +555,24 @@ public class RadioService extends Service {
 
     private void resumeAfterPause() {
         main.removeCallbacks(callPoll);
+        if (engine != null) {
+            if (requestFocus() != AudioManager.AUDIOFOCUS_REQUEST_GRANTED) {
+                // dźwięk wciąż zajęty: czekamy dalej
+                pauseKind = PAUSE_CALL;
+                sawCall = true;
+                main.postDelayed(callPoll, CALL_POLL_MS);
+                return;
+            }
+            pauseKind = PAUSE_NONE;
+            focusFactor = 1f;
+            applyVolume();
+            if (wifiLock != null) wifiLock.acquire();
+            engine.hold(false);   // gra od miejsca przerwania
+            syncEngine();
+            main.removeCallbacks(metaPoll);
+            main.post(metaPoll);
+            return;
+        }
         pauseKind = PAUSE_NONE;
         startStation();   // nowe połączenie, żeby grać na żywo, a nie od miejsca sprzed rozmowy
     }
@@ -536,7 +606,7 @@ public class RadioService extends Service {
 
     /** Żaden serwer nie odpowiedział: czekamy na internet albo próbujemy jeszcze raz. */
     private void allFailed() {
-        releasePlayer();
+        releaseMediaPlayer();
         long now = SystemClock.elapsedRealtime();
         if (netWaitStart == 0) netWaitStart = now;
         netOffline = !isOnline();
@@ -578,10 +648,21 @@ public class RadioService extends Service {
         try { if (cpuLock != null && cpuLock.isHeld()) cpuLock.release(); } catch (Exception ignored) { }
     }
 
+    private boolean bufferEnabled() { return prefs().getBoolean("buffer", true); }
+
+    private boolean useEngine(Station st) {
+        return st != null && bufferEnabled() && !legacyIds.contains(st.id) && !st.urls.isEmpty();
+    }
+
     private void openCurrent() {
         releasePlayer();
         Station st = current();
         if (st == null) { stopPlayback("stopped"); return; }
+        if (useEngine(st)) {
+            setState("connecting");
+            startEngine(st, false);
+            return;
+        }
         if (urlIdx >= st.urls.size()) { allFailed(); return; }
 
         setState("connecting");
@@ -640,7 +721,7 @@ public class RadioService extends Service {
         main.removeCallbacks(timeout);
         main.removeCallbacks(reopen);
         if (current() == null || pauseKind == PAUSE_CALL || pauseKind == PAUSE_LOST) return;
-        releasePlayer();
+        releaseMediaPlayer();
         if (!isOnline()) { allFailed(); return; }   // np. tunel albo rozmowa bez internetu: czekaj na zasięg
         if (hadPlayed && !retried) {
             // grało i przerwało: jeszcze raz ten sam serwer
@@ -676,6 +757,11 @@ public class RadioService extends Service {
     }
 
     private void releasePlayer() {
+        releaseMediaPlayer();
+        releaseEngine();
+    }
+
+    private void releaseMediaPlayer() {
         MediaPlayer p = mp;
         mp = null;
         if (p != null) {
@@ -684,10 +770,108 @@ public class RadioService extends Service {
         }
     }
 
+    private void releaseEngine() {
+        BufferedEngine e = engine;
+        engine = null;
+        bufRes = bufDelay = 0;
+        bufUp = bufRb = false;
+        lastBufPush = "";
+        if (e != null) e.release();
+    }
+
+    // ---------- odtwarzanie z zapasem ----------
+
+    private void startEngine(Station st, boolean held) {
+        releasePlayer();
+        final String stId = st.id;
+        final BufferedEngine[] ref = new BufferedEngine[1];
+        BufferedEngine e = new BufferedEngine(this, main, new BufferedEngine.Callback() {
+            @Override public void onEngineChange() { if (engine == ref[0]) syncEngine(); }
+            @Override public void onEngineFatal(String reason) { if (engine == ref[0]) engineFatal(stId, reason); }
+            @Override public void onEngineGiveUp() { if (engine == ref[0]) stopPlayback("failed"); }
+        }, "RadioRMF-Android/1.0", this::extraTlsFactory);
+        ref[0] = e;
+        engine = e;
+        e.setVolume(userVolume * focusFactor);
+        e.start(st.urls, 0);
+        if (engine == e && held) e.hold(true);
+    }
+
+    /** Ta stacja nie gra z zapasem: przejdź na zwykły odtwarzacz (do zmiany ustawienia albo ponownego uruchomienia). */
+    private void engineFatal(String stId, String reason) {
+        legacyIds.add(stId);
+        engineNote = reason;
+        releaseEngine();
+        urlIdx = 0;
+        hadPlayed = false;
+        retried = false;
+        if (pauseKind == PAUSE_CALL || pauseKind == PAUSE_LOST) return;   // po rozmowie zacznie zwykłym
+        openCurrent();
+    }
+
+    /** Stan odtwarzania z zapasem → stan usługi (co pół sekundy). */
+    private void syncEngine() {
+        BufferedEngine e = engine;
+        if (e == null) return;
+        bufRes = e.reserveMs();
+        bufDelay = e.delayMs();
+        bufUp = e.receiving();
+        bufRb = e.isRebuilding();
+        bufIdx = e.urlIndex();
+        bufUrl = e.url();
+        engineDiag = e.diag();
+        if (pauseKind == PAUSE_NONE) {
+            String s;
+            if (!e.everPlayed()) s = (!bufUp && !isOnline()) ? "waiting" : "connecting";
+            else if (e.isRebuilding()) s = e.rebuildFlowing() ? "rebuilding" : "waiting";
+            else if (e.isPlayingAudio()) s = "playing";
+            else s = bufUp ? "buffering" : "waiting";
+            boolean off = "waiting".equals(s) && !isOnline();
+            if (!s.equals(state) || off != netOffline) {
+                netOffline = off;
+                setState(s);
+            }
+        }
+        refreshDisplayedSong();
+        pushBufInfo();
+    }
+
+    /** Lekka wiadomość dla strony: zapas, opóźnienie (tylko gdy coś się zmieniło). */
+    private void pushBufInfo() {
+        Listener l = listener;
+        if (l == null) return;
+        JSONObject o = new JSONObject();
+        try {
+            o.put("ev", "buf");
+            o.put("st", state);
+            putBuf(o, engine != null);
+        } catch (JSONException ignored) { }
+        String j = o.toString();
+        if (j.equals(lastBufPush)) return;
+        lastBufPush = j;
+        l.onEvent(j);
+    }
+
+    // ---------- polecenia z ekranu (zapas) ----------
+
+    void playNow() { main.post(() -> { if (engine != null) { engine.playNow(); syncEngine(); } }); }
+
+    void goLive() { main.post(() -> { if (engine != null) { engine.goLive(); syncEngine(); } }); }
+
+    /** Zmieniono ustawienie zapasu: zagraj od nowa właściwym odtwarzaczem. */
+    void bufferSettingChanged() {
+        main.post(() -> {
+            legacyIds.clear();
+            engineNote = "";
+            if (isActive()) startStation();
+        });
+    }
+
     private void applyVolume() {
+        float v = userVolume * focusFactor;
+        if (engine != null) engine.setVolume(v);
         MediaPlayer p = mp;
         if (p == null) return;
-        float v = userVolume * focusFactor;
         try { p.setVolume(v, v); } catch (IllegalStateException ignored) { }
     }
 
@@ -743,15 +927,21 @@ public class RadioService extends Service {
 
     private void clearSong() {
         songA = songT = songC = nextA = nextT = "";
+        songs.clear();
+        coverShown = "";
         cover = null;
         coverData = "";
         coverBytes = null;
-        coverLoaded = "";
+    }
+
+    /** Tytuły pobieramy, gdy gra, a przy zapasie także w czasie rozmowy (po niej gra od miejsca przerwania). */
+    private boolean metaWanted() {
+        return isActive() || (engine != null && "interrupted".equals(state));
     }
 
     private void pollMeta() {
         Station st = current();
-        if (st == null || st.rid <= 0 || !isActive()) return;
+        if (st == null || st.rid <= 0 || !metaWanted()) return;
         final int gen = metaGen;
         final String url = "https://www.rmfon.pl/stacje/playlista_" + st.rid + ".json.txt";
         try {
@@ -763,7 +953,7 @@ public class RadioService extends Service {
                     if (gen != metaGen) return;
                     long wait = body != null ? applyPlaylist(body) : 30000;
                     main.removeCallbacks(metaPoll);
-                    if (isActive()) main.postDelayed(metaPoll, wait);
+                    if (metaWanted()) main.postDelayed(metaPoll, wait);
                 });
             });
         } catch (Exception ignored) { }
@@ -796,26 +986,61 @@ public class RadioService extends Service {
             if ("null".equals(c)) c = "";
             String na = next != null ? clean(next.optString("author")) : "";
             String nt = next != null ? clean(next.optString("title")) : "";
-            boolean changed = !t.equals(songT) || !a.equals(songA) || !nt.equals(nextT);
-            songT = t; songA = a; songC = c; nextA = na; nextT = nt;
-            if (!c.equals(coverLoaded)) {
-                // nowy utwór: stara okładka znika od razu, nowa dochodzi, gdy się pobierze
-                cover = null;
-                coverData = "";
-                coverBytes = null;
-                coverLoaded = c;
-                if (!c.isEmpty()) loadCover(c);
-                changed = true;
+            // zapisz, co i od kiedy gra na żywo; na ekranie pokaż to, co słychać (przy zapasie później)
+            Song last = songs.isEmpty() ? null : songs.get(songs.size() - 1);
+            if (last == null || !last.t.equals(t) || !last.a.equals(a) || !last.c.equals(c)) {
+                Song sg = new Song();
+                sg.at = System.currentTimeMillis();
+                sg.a = a; sg.t = t; sg.c = c; sg.na = na; sg.nt = nt;
+                songs.add(sg);
+                long keepFrom = System.currentTimeMillis() - 30 * 60_000L;
+                while (songs.size() > 2 && songs.get(1).at < keepFrom) songs.remove(0);
+                if (!c.isEmpty()) loadCover(c);   // okładka gotowa, zanim utwór zagra z zapasu
+            } else {
+                last.na = na;
+                last.nt = nt;
             }
-            if (changed) publish("meta");
+            refreshDisplayedSong();
             int up = next != null ? next.optInt("uptime", 0) : 0;
             if (up > 0) return Math.max(8000, Math.min(180000, (up + 6) * 1000L));
         } catch (Exception ignored) { }
         return 30000;
     }
 
+    /** Pokazuje utwór, który teraz słychać (na żywo minus opóźnienie z zapasu). */
+    private void refreshDisplayedSong() {
+        long delay = engine != null ? bufDelay : 0;
+        long when = System.currentTimeMillis() - delay;
+        Song pick = null;
+        for (Song sg : songs) {
+            if (sg.at <= when) pick = sg; else break;
+        }
+        if (pick == null && !songs.isEmpty() && delay < 5000) pick = songs.get(0);
+        String a = pick != null ? pick.a : "", t = pick != null ? pick.t : "", c = pick != null ? pick.c : "";
+        String na = pick != null ? pick.na : "", nt = pick != null ? pick.nt : "";
+        boolean changed = !t.equals(songT) || !a.equals(songA) || !nt.equals(nextT) || !na.equals(nextA);
+        songT = t; songA = a; songC = c; nextA = na; nextT = nt;
+        if (!c.equals(coverShown)) {
+            coverShown = c;
+            showCover(c);
+            changed = true;
+        }
+        if (changed) publish("meta");
+    }
+
+    private void showCover(String url) {
+        Cover cv = url.isEmpty() ? null : coverCache.get(url);
+        cover = cv != null ? cv.bmp : null;
+        coverData = cv != null ? cv.data : "";
+        coverBytes = cv != null ? cv.bytes : null;
+        coverMime = "image/png";
+        if (cv != null) coverSeq = cv.seq;
+        if (cv == null && !url.isEmpty()) loadCover(url);
+    }
+
     private void loadCover(String url) {
-        final int gen = metaGen;
+        if (coverCache.containsKey(url) || coverLoading.contains(url)) return;
+        coverLoading.add(url);
         try {
             net.execute(() -> {
                 StringBuilder log = new StringBuilder();
@@ -823,22 +1048,19 @@ public class RadioService extends Service {
                 Bitmap bmp = null;
                 String data = "";
                 byte[] encoded = null;
-                boolean isPng = false;
                 if (f != null) {
                     bmp = BitmapFactory.decodeByteArray(f.body, 0, f.body.length);
                     if (bmp != null) {
-                        // zapisz na nowo w zwykłym formacie: stare przeglądarki w radiach nie czytają
-                        // niektórych plików JPEG (np. w kolorach do druku), które Android otwiera bez problemu
-                        boolean png = bmp.hasAlpha();
+                        // zapisz na nowo jako PNG: przeglądarka w radiu (test obrazków w Diagnostyce)
+                        // pokazuje PNG, a żadnego JPEG-a
                         ByteArrayOutputStream enc = new ByteArrayOutputStream();
-                        if (bmp.compress(png ? Bitmap.CompressFormat.PNG : Bitmap.CompressFormat.JPEG, 88, enc)) {
+                        if (bmp.compress(Bitmap.CompressFormat.PNG, 100, enc)) {
                             encoded = enc.toByteArray();
-                            isPng = png;
-                            data = "data:image/" + (png ? "png" : "jpeg") + ";base64," + Base64.encodeToString(encoded, Base64.NO_WRAP);
+                            data = "data:image/png;base64," + Base64.encodeToString(encoded, Base64.NO_WRAP);
                         }
                         log.append(", ").append(bmp.getWidth()).append("×").append(bmp.getHeight()).append(" px")
                                 .append(", źródło ").append(f.type).append(" ").append(f.body.length / 1024).append(" kB")
-                                .append(data.isEmpty() ? ", nie udało się przekodować" : ", przekodowana");
+                                .append(data.isEmpty() ? ", nie udało się przekodować" : ", przekodowana na PNG");
                     } else {
                         log.append(", nie da się odczytać obrazka (").append(f.type).append(", ").append(f.body.length).append(" B)");
                     }
@@ -847,18 +1069,26 @@ public class RadioService extends Service {
                 final Bitmap rb = bmp;
                 final String rd = data;
                 final byte[] re = encoded;
-                final boolean rp = isPng;
                 main.post(() -> {
-                    if (gen != metaGen || !url.equals(coverLoaded)) return;
-                    cover = rb;
-                    coverData = rd;
-                    coverMime = rp ? "image/png" : "image/jpeg";
-                    coverSeq++;
-                    coverBytes = re;
-                    if (rb != null) publish("meta");
+                    coverLoading.remove(url);
+                    if (rb == null || re == null) return;   // nieudane: spróbujemy przy następnym utworze
+                    Cover cv = new Cover();
+                    cv.bmp = rb;
+                    cv.bytes = re;
+                    cv.data = rd;
+                    cv.seq = ++coverCounter;
+                    coverCache.put(url, cv);
+                    Iterator<String> it = coverCache.keySet().iterator();
+                    while (coverCache.size() > 6 && it.hasNext()) { it.next(); it.remove(); }
+                    if (url.equals(coverShown)) {
+                        showCover(url);
+                        publish("meta");
+                    }
                 });
             });
-        } catch (Exception ignored) { }
+        } catch (Exception ignored) {
+            coverLoading.remove(url);
+        }
     }
 
     private String httpText(String url, StringBuilder log) {
@@ -883,7 +1113,10 @@ public class RadioService extends Service {
     /** Tekst do sekcji Diagnostyka. */
     String diagText() {
         Station st = current();
-        return "Stan: " + state + (st != null ? " · " + st.name + " (nr RMF ON " + st.rid + ")" : "")
+        String eng = engine != null ? engineDiag
+                : "Odtwarzacz: zwykły (MediaPlayer)" + (!bufferEnabled() ? " — zapas na tunele wyłączony w ustawieniach"
+                : engineNote.isEmpty() ? "" : " — zapas nie zadziałał: " + engineNote);
+        return eng + "\nStan: " + state + (st != null ? " · " + st.name + " (nr RMF ON " + st.rid + ")" : "")
                 + "\nTeraz gra: " + (songT.isEmpty() ? "brak danych" : songA + " – " + songT)
                 + "\nTytuły: " + diagPlaylist
                 + "\nOkładka (aplikacja): " + diagCover
@@ -964,7 +1197,7 @@ public class RadioService extends Service {
     }
 
     /** Certyfikaty systemu + dołączone nowsze certyfikaty główne (res/raw/extra_roots.pem). */
-    private SSLSocketFactory extraTlsFactory() {
+    private synchronized SSLSocketFactory extraTlsFactory() {
         if (extraTlsTried) return extraTls;
         extraTlsTried = true;
         try {
@@ -1003,7 +1236,10 @@ public class RadioService extends Service {
 
     private String statusLabel() {
         switch (state) {
-            case "playing": return "Na żywo";
+            case "playing":
+                if (engine != null && !bufUp && bufRes > 0) return "Brak zasięgu — gram z zapasu";
+                return engine != null && bufDelay >= 10_000 ? "Gra z zapasem na tunele" : "Na żywo";
+            case "rebuilding": return "Zbieram zapas na tunele…";
             case "connecting": return "Łączę…";
             case "buffering": return "Buforuję…";
             case "failed": return "Brak połączenia — spróbuj ponownie";
@@ -1020,6 +1256,7 @@ public class RadioService extends Service {
             case "playing": ps = PlaybackState.STATE_PLAYING; break;
             case "connecting": ps = PlaybackState.STATE_CONNECTING; break;
             case "buffering": ps = PlaybackState.STATE_BUFFERING; break;
+            case "rebuilding": ps = PlaybackState.STATE_BUFFERING; break;
             case "failed": ps = PlaybackState.STATE_ERROR; break;
             case "interrupted": ps = PlaybackState.STATE_PAUSED; break;
             case "waiting": ps = PlaybackState.STATE_CONNECTING; break;

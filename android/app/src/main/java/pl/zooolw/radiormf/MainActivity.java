@@ -395,6 +395,33 @@ public class MainActivity extends Activity {
             return sys + "\n" + (svc != null ? svc.diagText() : "Odtwarzacz jeszcze nie uruchomiony — włącz stację.");
         }
 
+        /** Zapas na tunele (ustawienie; domyślnie włączony). */
+        @JavascriptInterface
+        public boolean isBuffer() {
+            return getSharedPreferences("radio", MODE_PRIVATE).getBoolean("buffer", true);
+        }
+
+        @JavascriptInterface
+        public void setBuffer(boolean on) {
+            getSharedPreferences("radio", MODE_PRIVATE).edit().putBoolean("buffer", on).apply();
+            RadioService svc = RadioService.instance;
+            if (svc != null) svc.bufferSettingChanged();
+        }
+
+        /** Przerwij zbieranie zapasu i graj od razu. */
+        @JavascriptInterface
+        public void playNow() {
+            RadioService svc = RadioService.instance;
+            if (svc != null) svc.playNow();
+        }
+
+        /** Porzuć zapas i graj na żywo. */
+        @JavascriptInterface
+        public void goLive() {
+            RadioService svc = RadioService.instance;
+            if (svc != null) svc.goLive();
+        }
+
         @JavascriptInterface
         public String carTemp() {
             return carTempJson();

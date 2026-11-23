@@ -166,10 +166,12 @@ button:focus,summary:focus,input[type=range]:focus{outline:none}
 .led{flex:none;width:9px;height:9px;border-radius:50%;background:var(--muted)}
 .status[data-s="playing"] .led{background:var(--ok);box-shadow:0 0 8px var(--ok);animation:pulse 1.8s ease-in-out infinite}
 .status[data-s="interrupted"] .led{background:var(--accent)}
-.status[data-s="connecting"] .led,.status[data-s="buffering"] .led,.status[data-s="waiting"] .led{background:var(--accent);animation:blink .8s steps(2) infinite}
+.status[data-s="connecting"] .led,.status[data-s="buffering"] .led,.status[data-s="waiting"] .led,.status[data-s="rebuilding"] .led{background:var(--accent);animation:blink .8s steps(2) infinite}
 .status[data-s="failed"] .led{background:var(--bad)}
 .status[data-s="failed"]{color:var(--bad)}
 .meta{margin-top:-8px;font:12px var(--f-mono);color:var(--muted);word-wrap:break-word; overflow-wrap:anywhere}
+.bufline{margin-top:-14px;display:flex;align-items:center;flex-wrap:wrap;font:12px var(--f-mono);color:var(--muted);font-variant-numeric:tabular-nums}
+.bufline .buf-btn{margin-left:10px;padding-top:2px;padding-bottom:2px}
 
 .transport{display:flex;align-items:center;justify-content:center;gap:22px;padding-top:4px;padding-bottom:4px}
 .btn-round{
@@ -349,6 +351,7 @@ kbd{font:inherit;border:1px solid var(--line);border-bottom-width:2px;border-rad
     </div>
     <div class="status" id="status" data-s="idle"><span class="led"></span><span id="statusText">Gotowe — naciśnij start</span></div>
     <div class="meta" id="meta">serwery rmfstream.pl</div>
+    <div class="bufline" id="bufLine" hidden><span id="bufText"></span><button class="btn-text buf-btn" type="button" id="bufBtn" hidden></button></div>
 
     <div class="transport">
       <button class="btn-round" id="prev" type="button" aria-label="Poprzednia stacja" title="Poprzednia stacja (←)">
@@ -422,6 +425,14 @@ kbd{font:inherit;border:1px solid var(--line);border-bottom-width:2px;border-rad
           <button class="chip" type="button" data-min="90" aria-pressed="false">1,5 h</button>
         </div>
         <span class="setting-note" id="sleepNote">Radio gra, dopóki go nie zatrzymasz.</span>
+      </div>
+      <div class="setting" id="bufSetting" hidden>
+        <span class="setting-label">Zapas na tunele</span>
+        <div class="chips" id="bufChips">
+          <button class="chip" type="button" data-buf="1" aria-pressed="true">Włączony</button>
+          <button class="chip" type="button" data-buf="0" aria-pressed="false">Wyłączony</button>
+        </div>
+        <span class="setting-note">Bez zasięgu radio gra dalej z pamięci. Zapas (do 2 minut) zbiera się po dłuższej przerwie w zasięgu i w czasie rozmowy — radio gra wtedy z takim opóźnieniem.</span>
       </div>
       <div class="setting" id="fsSetting" hidden>
         <span class="setting-label">Pełny ekran</span>
@@ -653,6 +664,12 @@ window.addEventListener('online', function(){
 /* zdarzenia z natywnego odtwarzacza (aplikacja na Androida) */
 window.__radio = function(e){
   if (!NATIVE || !e || !e.ev) return;
+  readBuf(e);
+  if (e.ev === 'buf'){
+    if (state === 'playing') $('statusText').textContent = statusText();
+    paintBuf();
+    return;
+  }
   if (e.id && (!current || current.id !== e.id)){
     var st = findStation(e.id);
     if (st){ current = st; store.set('last', st.id); listenStart = 0; cands = candidatesFor(st); showStation(); }
@@ -668,7 +685,7 @@ window.__radio = function(e){
     }
     ci = k < 0 ? 0 : k;
   }
-  if (e.ev === 'connecting' || e.ev === 'buffering'){ wantPlaying = true; setState(e.ev); }
+  if (e.ev === 'connecting' || e.ev === 'buffering' || e.ev === 'rebuilding'){ wantPlaying = true; setState(e.ev); }
   else if (e.ev === 'playing'){
     wantPlaying = true;
     var c = cands[ci];
@@ -695,11 +712,16 @@ function statusText(){
   switch (state){
     case 'connecting': return 'Łączę… serwer ' + (ci + 1) + ' z ' + cands.length;
     case 'buffering':  return 'Buforuję…';
-    case 'playing':    return 'Na żywo · ' + clock(Date.now() - listenStart);
+    case 'rebuilding': return 'Zbieram zapas na tunele…';
+    case 'playing':
+      if (bufInfo && bufInfo.buf && !bufInfo.up && bufInfo.res > 0) return 'Brak zasięgu — gram z zapasu · ' + clock(Date.now() - listenStart);
+      if (bufInfo && bufInfo.buf && bufInfo.delay >= 10) return 'Gra z zapasem · ' + clock(Date.now() - listenStart);
+      return 'Na żywo · ' + clock(Date.now() - listenStart);
     case 'paused':     return 'Zatrzymane';
     case 'failed':     return 'Brak połączenia z serwerami tej stacji. Sprawdź internet albo wybierz inną.';
     case 'interrupted':
       if (!NATIVE) return 'Przerwa (np. rozmowa) — wznowię po jej końcu';
+      if (bufInfo && bufInfo.buf) return pauseCall ? 'Wstrzymane na czas rozmowy — potem zagram od tego miejsca' : 'Wstrzymane — zagram dalej od tego miejsca';
       return pauseCall ? 'Wstrzymane na czas rozmowy — wznowię po jej końcu' : 'Wstrzymane — wznowię automatycznie';
     case 'waiting':    return netOffline ? 'Brak internetu — połączę, gdy wróci zasięg' : 'Ponawiam połączenie…';
     default:           return 'Gotowe — naciśnij start';
@@ -710,7 +732,7 @@ function setState(s){
   $('status').dataset.s = s;
   $('play').dataset.s = s;
   $('statusText').textContent = statusText();
-  var active = (s === 'playing' || s === 'connecting' || s === 'buffering' || s === 'waiting');
+  var active = (s === 'playing' || s === 'connecting' || s === 'buffering' || s === 'waiting' || s === 'rebuilding');
   $('playIcon').innerHTML = active ? ICON_STOP : ICON_PLAY;
   $('play').setAttribute('aria-label', active ? 'Stop' : 'Start');
   if (!NATIVE){
@@ -722,14 +744,48 @@ function setState(s){
   $('meta').textContent = c ? c.host + ' · ' + c.fmt : (current && current.cands ? 'katalog Radio Browser' : 'serwery rmfstream.pl');
   $('dialRight').textContent = c ? c.fmt : '—';
   $('dialLeft').textContent = s === 'playing' ? 'Odbiór'
-    : (s === 'connecting' || s === 'buffering' || s === 'waiting') ? 'Strojenie'
+    : (s === 'connecting' || s === 'buffering' || s === 'waiting' || s === 'rebuilding') ? 'Strojenie'
     : s === 'interrupted' ? 'Pauza' : 'Strumień';
   if ('mediaSession' in navigator){
     try{ navigator.mediaSession.playbackState = active ? 'playing' : 'paused'; }catch(e){}
   }
   markLists();
+  paintBuf();
 }
 setInterval(function(){ if (state === 'playing') $('statusText').textContent = statusText(); }, 1000);
+
+/* ---------- zapas na tunele (tylko aplikacja na Androida) ---------- */
+var bufInfo = null;   // {buf, res, delay, up, rb, tgt} w sekundach
+function mmss(sec){ sec = Math.max(0, Math.round(sec || 0)); return Math.floor(sec / 60) + ':' + pad(sec % 60); }
+function readBuf(e){
+  if (!('buf' in e)) return;
+  bufInfo = e.buf ? {buf: true, res: e.res || 0, delay: e.delay || 0, up: !!e.up, rb: !!e.rb, tgt: e.tgt || 120} : null;
+}
+function paintBuf(){
+  var line = $('bufLine'), btn = $('bufBtn');
+  if (!line) return;
+  var b = bufInfo;
+  var shown = state === 'playing' || state === 'rebuilding' || state === 'waiting' || state === 'buffering' || state === 'interrupted';
+  if (!NATIVE || !b || !shown){ line.hidden = true; return; }
+  var txt, act = '';
+  if (state === 'rebuilding'){ txt = 'Zbieram zapas: ' + mmss(b.res) + ' z ' + mmss(b.tgt); act = 'Graj teraz'; }
+  else if (state === 'waiting' && b.rb) txt = 'Po powrocie zasięgu zbiorę ' + mmss(b.tgt) + ' zapasu';
+  else if (state === 'playing' && !b.up && b.res > 0) txt = 'Bez zasięgu — zapasu zostało ' + mmss(b.res);
+  else {
+    txt = 'Zapas na tunele: ' + mmss(b.res) + (b.delay >= 10 ? ' · opóźnienie ' + mmss(b.delay) : '');
+    if (b.delay >= 15 && state === 'playing') act = 'Na żywo';
+  }
+  $('bufText').textContent = txt;
+  btn.textContent = act;
+  btn.hidden = !act;
+  line.hidden = false;
+}
+if (NATIVE) $('bufBtn').addEventListener('click', function(){
+  try{
+    if (state === 'rebuilding') NATIVE.playNow();
+    else NATIVE.goLive();
+  }catch(e){}
+});
 
 // temperatura zewnętrzna z CAN (tylko w aplikacji na radiu; radio rozsyła ją razem ze stanem klimatyzacji)
 var carTemp = null;              // {v: liczba, f: true gdy °F, at: czas odczytu}
@@ -921,6 +977,27 @@ function pollMeta(){
     metaBusy = false;
     metaFails++;
     if (metaFails < 3) metaTimer = setTimeout(pollMeta, 30000);   // potem cisza do następnej zmiany stacji
+  });
+}
+
+/* ---------- zapas na tunele: włącz / wyłącz (tylko aplikacja na Androida) ---------- */
+if (NATIVE && typeof NATIVE.setBuffer === 'function'){
+  var bufOn = true;
+  try{ bufOn = !!NATIVE.isBuffer(); }catch(e){}
+  var paintBufSetting = function(){
+    Array.prototype.slice.call($('bufChips').querySelectorAll('.chip')).forEach(function(b){
+      b.setAttribute('aria-pressed', (b.dataset.buf === '1') === bufOn ? 'true' : 'false');
+    });
+  };
+  $('bufSetting').hidden = false;
+  paintBufSetting();
+  $('bufChips').addEventListener('click', function(e){
+    var b = e.target.closest('.chip'); if (!b) return;
+    var on = b.dataset.buf === '1';
+    if (on === bufOn) return;
+    bufOn = on;
+    try{ NATIVE.setBuffer(bufOn); }catch(err){}
+    paintBufSetting();
   });
 }
 
